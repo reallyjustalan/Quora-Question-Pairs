@@ -17,7 +17,8 @@ This project uses [uv](https://github.com/astral-sh/uv) for dependency managemen
 uv sync
 ```
 
-Dependencies include `torch` (CUDA 12.6 wheel on Linux), `sentence-transformers`, `catboost`, `zarr`, `dvc[s3]`, and `scikit-learn`. See `pyproject.toml` for the full list.
+*Dependencies include `torch` (CUDA 12.6 wheel on Linux), `sentence-transformers`, `catboost`, `zarr`, `dvc[s3]`, and `scikit-learn`. See `pyproject.toml` for the full list.*
+
 ---
 
 ## Getting the Embeddings (DVC)
