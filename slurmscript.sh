@@ -3,11 +3,11 @@
 #SBATCH --output=embed_%j.log
 #SBATCH --error=embed_%j.err
 #SBATCH --time=02:00:00
-#SBATCH --mem=16G
-#SBATCH --cpus-per-task=4
-#SBATCH --gpus=1
+#SBATCH --partition=gpu
+#SBATCH --mem=256G
+#SBATCH --cpus-per-task=32
+#SBATCH --gpus=h200-141:4
 
 cd ~/Quora-Question-Pairs
 
-# uv creates and manages the venv automatically
 uv run python embed_quora.py

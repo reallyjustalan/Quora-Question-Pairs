@@ -7,7 +7,7 @@ from datasets import load_dataset
 # Config
 MODEL_NAME = "Qwen/Qwen3-Embedding-4B"
 OUTPUT_FILE = "embeddings.zarr"
-BATCH_SIZE = 256
+BATCH_SIZE = 128
 
 def format_duration(seconds: float) -> str:
     seconds = int(seconds)
@@ -39,8 +39,14 @@ N = len(sorted_ids)
 print(f"[INFO] Unique questions: {N}", flush=True)
 
 # Load model
-print(f"[INFO] Loading model: {MODEL_NAME}", flush=True)
-model = SentenceTransformer(MODEL_NAME)
+print(f"[INFO] Loading model: {MODEL_NAME} (device_map=auto, Flash Attention 2)", flush=True)
+model = SentenceTransformer(
+    MODEL_NAME,
+    model_kwargs={
+        "attn_implementation": "flash_attention_2",
+        "device_map": "auto",
+    },
+)
 dim = model.get_sentence_embedding_dimension()
 print(f"[INFO] Embedding dimension: {dim}", flush=True)
 
