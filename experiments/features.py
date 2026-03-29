@@ -10,6 +10,8 @@ None of these functions do any scaling, normalisation, or model logic.
 
 from __future__ import annotations
 
+import time
+
 import numpy as np
 
 from data import PairRecord
@@ -203,6 +205,8 @@ def matryoshka_all_features(
 def build_matrix(
     records: list[PairRecord],
     feature_fn,
+    log_every: int = 50_000,
+    log_prefix: str = "[features]",
 ) -> tuple[np.ndarray, list[str]]:
     """
     Apply `feature_fn` to every PairRecord and stack into a float32 matrix.
@@ -222,14 +226,48 @@ def build_matrix(
     if not records:
         raise ValueError("records list is empty")
 
+    def _fmt(seconds: float) -> str:
+        s = int(seconds)
+        m, s = divmod(s, 60)
+        h, m = divmod(m, 60)
+        if h:
+            return f"{h}h {m:02d}m {s:02d}s"
+        if m:
+            return f"{m}m {s:02d}s"
+        return f"{s}s"
+
     # Use first record to discover column order
     sample = feature_fn(records[0])
     feature_names = list(sample.keys())
+    n_rows = len(records)
+    n_feats = len(feature_names)
 
-    X = np.empty((len(records), len(feature_names)), dtype=np.float32)
+    print(
+        f"{log_prefix} Building matrix: rows={n_rows}, features={n_feats}",
+        flush=True,
+    )
+
+    X = np.empty((n_rows, n_feats), dtype=np.float32)
+    start = last_log = time.time()
+
     for i, rec in enumerate(records):
         feat = feature_fn(rec)
         for j, name in enumerate(feature_names):
             X[i, j] = feat[name]
+
+        done = i + 1
+        now = time.time()
+        if done == n_rows or done % log_every == 0 or (now - last_log) >= 30:
+            elapsed = now - start
+            rate = done / elapsed if elapsed > 0 else 0.0
+            remaining = n_rows - done
+            eta_sec = (remaining / rate) if rate > 0 else 0.0
+            print(
+                f"{log_prefix} {done}/{n_rows} rows | "
+                f"elapsed {_fmt(elapsed)} | eta {_fmt(eta_sec)} | "
+                f"{rate:.0f} rows/s",
+                flush=True,
+            )
+            last_log = now
 
     return X, feature_names
