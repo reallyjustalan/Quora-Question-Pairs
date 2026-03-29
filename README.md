@@ -85,7 +85,8 @@ Look up a question by ID with `np.searchsorted(store["ids"], qid)`.
 > Useful Slurm commands:
 > | Command | What it does |
 > |---------|-------------|
-> | `sbatch slurmscript.sh` | Submit a job to the queue |
+> | `sbatch slurm_gpu.sh <script.py> [args...]` | Submit a GPU job to the queue |
+> | `sbatch slurm_cpu.sh <script.py> [args...]` | Submit a CPU-only job to the queue |
 > | `squeue -u $USER` | Check the status of your queued/running jobs, $USER being your e1111.. username |
 > | `scancel <jobid>` | Cancel a job |
 > | `sinfo` | See available partitions and node status |
@@ -117,14 +118,28 @@ Pull the embeddings with DVC (place the provided config files first - you may co
 uv run dvc pull
 ```
 
-Submit the embedding job (H200 GPU, 64 GB RAM, 2 h wall time):
+There are two Slurm scripts — one for GPU jobs and one for CPU-only jobs. Both take a Python script as their first positional argument, plus any additional arguments to forward to it:
+
+**GPU job** (H200 GPU, 64 GB RAM, 8 CPUs, 2 h wall time) — use for embedding:
 
 ```bash
-sbatch slurmscript.sh
-# Output: embed_<jobid>.log / embed_<jobid>.err
+sbatch slurm_gpu.sh embed_quora.py
+# Output: gpu_<jobid>.log / gpu_<jobid>.err
 ```
 
-To run the classifiers interactively or as a batch job, adapt `slurmscript.sh` — replace `embed_quora.py` with `catboost_thresh.py` as needed. The classifier script is CPU-only and does not require a GPU partition.
+**CPU-only job** (64 GB RAM, 16 CPUs, 2 h wall time) — use for classifiers:
+
+```bash
+sbatch slurm_cpu.sh catboost_thresh.py
+# Output: cpu_<jobid>.log / cpu_<jobid>.err
+```
+
+You can pass extra arguments to the script like so:
+
+```bash
+sbatch slurm_gpu.sh embed_quora.py --batch-size 64
+sbatch slurm_cpu.sh catboost_thresh.py --threshold 0.5
+```
 
 ---
 
@@ -135,7 +150,8 @@ To run the classifiers interactively or as a batch job, adapt `slurmscript.sh` �
 ├── embed_quora.py          # Embedding pipeline
 ├── catboost_thresh.py      # CatBoost classifier (+ logistic regression baseline)
 ├── embeddings.zarr.dvc     # DVC pointer to the Zarr store
-├── slurmscript.sh          # Slurm job script (embedding)
+├── slurm_gpu.sh            # Slurm job script for GPU tasks (e.g. embedding)
+├── slurm_cpu.sh            # Slurm job script for CPU-only tasks (e.g. classifiers)
 ├── pyproject.toml
 └── uv.lock
 ```
