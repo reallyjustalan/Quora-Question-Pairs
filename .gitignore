@@ -9,5 +9,6 @@ logs/
 *.err
 embeddings.zarr
 .dvc/*
+!.dvc/config
 .venv
 .DS_Store

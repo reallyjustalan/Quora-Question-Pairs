@@ -1,0 +1,6 @@
+[core]
+    remote = r2remote
+[remote "r2remote"]
+    url = s3://cs3244-data
+    endpointurl = https://4a13a3cf7b7b4b7e251d1482419db243.r2.cloudflarestorage.com
+    region = auto
