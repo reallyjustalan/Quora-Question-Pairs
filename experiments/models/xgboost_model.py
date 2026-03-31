@@ -18,6 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from data import PairRecord
 from features import build_matrix, matryoshka_all_features, DEFAULT_MATRYOSHKA_DIMS
+from hyperparameter_tuning import RandomizedSearchCV
 
 
 _DEFAULTS = dict(
@@ -33,6 +34,13 @@ _DEFAULTS = dict(
     random_state=42,
     n_jobs=-1,
 )
+
+param_space = {'max_depth': {'type': 'int', 'low': 3, 'high': 10},
+               'learning_rate': {'type': 'float', 'low': 0.01, 'high': 0.3, 'log': True},
+               'subsample': {'type': 'float', 'low': 0.5, 'high': 1.0}, #prevents overfitting by sampling a fraction of training data
+               'colsample_bytree': {'type': 'float', 'low': 0.5, 'high': 1.0}, #prevents overfitting by sampling a fraction of features
+               'reg_lambda': {'type': 'float', 'low': 1e-3, 'high': 100.0, 'log': True} #regularisation strength (L2)
+               }
 
 
 class XGBoostModel:
@@ -75,6 +83,20 @@ class XGBoostModel:
     # Sklearn-style interface
     # ------------------------------------------------------------------
 
+    def tune(self, X: np.ndarray, y: np.ndarray) -> None:
+        tuner = RandomizedSearchCV(
+            estimator=XGBClassifier(**_DEFAULTS),
+            param_distributions=param_space,
+            n_iter=20,
+            cv=3,
+            scoring="f1",
+            random_state=42,
+            n_jobs=-1,
+        )
+        tuner.fit(X, y)
+        best_params = tuner.best_params_
+        self._model.set_params(**best_params)
+    
     def fit(self, X_train: np.ndarray, y_train: np.ndarray) -> None:
         self._model.fit(X_train, y_train)
 

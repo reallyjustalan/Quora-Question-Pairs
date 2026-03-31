@@ -261,6 +261,9 @@ def run(args: argparse.Namespace) -> None:
     # ------------------------------------------------------------------
     print(f"\n[run] Fitting model...", flush=True)
     t_fit = time.time()
+    if hasattr(model, 'tune'): #should work for classes with tune method, CatBoost & XGBoost
+        model.tune(X_train, y_train)
+
     model.fit(X_train, y_train)
     print(f"[run] Fit complete in {time.time() - t_fit:.1f}s", flush=True)
 
