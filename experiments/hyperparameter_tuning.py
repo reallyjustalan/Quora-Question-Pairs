@@ -175,7 +175,7 @@ class OptunaSearchCV:
         param_distributions: Dict[str, Dict[str, Any]],
         cv: int = 5,
         scoring: Optional[str] = None,
-        n_trials: int = 100,
+        n_trials: int = 20,
         timeout: Optional[int] = None,
         random_state: int = 42,
         verbose: int = 1,

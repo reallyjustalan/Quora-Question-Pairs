@@ -106,7 +106,7 @@ class CatBoostModel:
             estimator=CatBoostClassifier(**_DEFAULTS),
             param_distributions=param_space,
             n_iter=20,
-            cv=3,
+            cv=5,
             scoring="f1",
             random_state=42,
             n_jobs=-1,
