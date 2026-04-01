@@ -7,6 +7,7 @@ from .xgboost_model import XGBoostModel
 from .randomforest_model import RandomForestModel
 from .randomforest_topk_model import RandomForestTopKModel
 from .gru_model import GRUModel
+from .gru_model_v2 import GRUModelV2
 
 __all__ = [
     "CatBoostModel",
@@ -15,5 +16,6 @@ __all__ = [
     "XGBoostModel",
     "RandomForestModel",
     "RandomForestTopKModel",
-    "GRUModel"
+    "GRUModel",
+    "GRUModelV2",
 ]
