@@ -33,10 +33,10 @@ _DEFAULTS = dict(
     verbose=100,
 )
 
-param_space = {'iterations': {'type': 'int', 'low': 300, 'high': 1200},
-               'depth': {'type': 'int', 'low': 4, 'high': 10},
-               'learning_rate': {'type': 'float', 'low': 0.01, 'high': 0.3, 'log': True},
-               'l2_leaf_reg': {'type': 'float', 'low': 1.0, 'high': 20.0, 'log': True}
+param_space = {'iterations': {'type': 'int', 'low': 100, 'high': 1000}, #number of boosting rounds
+               'depth': {'type': 'int', 'low': 4, 'high': 10}, #maximum depth of trees -- large trees are more expressive but may overfit
+               'learning_rate': {'type': 'float', 'low': 0.01, 'high': 0.3, 'log': True}, #step size - affects speed of convergence to minima
+               'l2_leaf_reg': {'type': 'float', 'low': 1.0, 'high': 20.0, 'log': True} #strength of Ridge Regularisation
                }
 
 class CatBoostModel:
@@ -64,6 +64,9 @@ class CatBoostModel:
         self._dims = matryoshka_dims
         self._params = params
         self._feature_names: list[str] = []
+        self._tuning_info: dict[str, object] = {
+            "enabled": False,
+        }
 
     @property
     def matryoshka_dims(self) -> tuple[int, ...] | None:
@@ -103,16 +106,23 @@ class CatBoostModel:
             estimator=CatBoostClassifier(**_DEFAULTS),
             param_distributions=param_space,
             n_iter=20,
-            cv=3,
+            cv=5,
             scoring="f1",
             random_state=42,
             n_jobs=-1,
         )
         tuner.fit(X, y)
-        best_params = tuner.best_params_
+        best_params = tuner.get_best_params()
+        best_score = tuner.get_best_score()
         print("Best hyperparameters:", best_params)
         self._params.update(best_params)
         self._model.set_params(**best_params)
+        self._tuning_info = {
+            "enabled": True,
+            "method": "RandomizedSearchCV",
+            "best_cv_score": float(best_score),
+            "best_params": best_params,
+        }
     
     def fit(self, X_train: np.ndarray, y_train: np.ndarray) -> None:
         self._model.fit(X_train, y_train)
@@ -139,6 +149,7 @@ class CatBoostModel:
             "model_class": "CatBoostModel",
             "matryoshka_dims": dims_used,
             "hyperparams": {k: v for k, v in self._params.items()},
+            "tuning": self._tuning_info,
             "n_features": len(self._feature_names),
             "feature_names": self._feature_names,
         }

@@ -14,6 +14,8 @@ Optional flags:
     --max-rows   INT    Subsample the dataset (e.g. 50000 for smoke-tests)
     --test-size  FLOAT  Fraction held out for testing (default: 0.20)
     --threshold  FLOAT  Decision threshold (default: model's own, else 0.5)
+    --tune              Force hyperparameter tuning when supported by model
+    --no-tune           Skip hyperparameter tuning even if model supports it
     --zarr       PATH   Path to embeddings.zarr (default: ../embeddings.zarr)
     --split-file PATH   Path to .npz split file (default: splits/default_split.npz)
     --results-dir PATH  Where to write reports (default: results/)
@@ -105,6 +107,20 @@ def parse_args() -> argparse.Namespace:
         metavar="T",
         help="Decision threshold. Defaults to the model's own threshold, or 0.5.",
     )
+    tune_group = parser.add_mutually_exclusive_group()
+    tune_group.add_argument(
+        "--tune",
+        dest="tune",
+        action="store_true",
+        help="Run hyperparameter tuning (if model supports tune()).",
+    )
+    tune_group.add_argument(
+        "--no-tune",
+        dest="tune",
+        action="store_false",
+        help="Skip hyperparameter tuning.",
+    )
+    parser.set_defaults(tune=None)
     parser.add_argument(
         "--zarr",
         default=None,
@@ -261,8 +277,25 @@ def run(args: argparse.Namespace) -> None:
     # ------------------------------------------------------------------
     print(f"\n[run] Fitting model...", flush=True)
     t_fit = time.time()
-    if hasattr(model, 'tune'): #should work for classes with tune method, CatBoost & XGBoost
+    model_supports_tune = hasattr(model, "tune")
+    if args.tune is None:
+        do_tune = model_supports_tune
+    else:
+        do_tune = bool(args.tune)
+
+    if do_tune and not model_supports_tune:
+        print(
+            f"[run] Tuning requested but {getattr(model, 'name', type(model).__name__)} "
+            "does not implement tune(); continuing without tuning.",
+            flush=True,
+        )
+        do_tune = False
+
+    if do_tune:
+        print("[run] Hyperparameter tuning enabled.", flush=True)
         model.tune(X_train, y_train)
+    else:
+        print("[run] Hyperparameter tuning skipped.", flush=True)
 
     model.fit(X_train, y_train)
     print(f"[run] Fit complete in {time.time() - t_fit:.1f}s", flush=True)
@@ -282,6 +315,7 @@ def run(args: argparse.Namespace) -> None:
         "max_rows":    args.max_rows,
         "test_size":   args.test_size,
         "threshold":   args.threshold,
+        "tune":        args.tune,
         "zarr":        zarr_path,
         "split_file":  split_file,
         "results_dir": results_dir,

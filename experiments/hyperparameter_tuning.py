@@ -10,6 +10,7 @@ from typing import Any, Dict, Optional, Tuple
 import numpy as np
 from sklearn.model_selection import RandomizedSearchCV as SklearnRandomizedSearchCV
 from sklearn.base import clone
+from scipy.stats import randint, uniform, loguniform
 import optuna
 from optuna.pruners import MedianPruner
 from optuna.samplers import TPESampler
@@ -64,6 +65,42 @@ class RandomizedSearchCV:
         self.best_score = None
         self.best_model = None
     
+    def _normalize_param_distributions(self) -> Dict[str, Any]:
+        """
+        Accept both sklearn-native distributions/lists and Optuna-style specs.
+
+        Supported schema for each parameter:
+        - sklearn-native list/distribution object (passed through)
+        - {'type': 'categorical', 'choices': [...]} 
+        - {'type': 'int', 'low': a, 'high': b}
+        - {'type': 'float', 'low': a, 'high': b, 'log': bool}
+        """
+        normalized: Dict[str, Any] = {}
+
+        for name, spec in self.param_distributions.items():
+            if not isinstance(spec, dict) or "type" not in spec:
+                normalized[name] = spec
+                continue
+
+            param_type = spec.get("type")
+            if param_type == "categorical":
+                normalized[name] = spec["choices"]
+            elif param_type == "int":
+                low = int(spec["low"])
+                high = int(spec["high"])
+                normalized[name] = randint(low, high + 1)
+            elif param_type == "float":
+                low = float(spec["low"])
+                high = float(spec["high"])
+                if spec.get("log", False):
+                    normalized[name] = loguniform(low, high)
+                else:
+                    normalized[name] = uniform(low, high - low)
+            else:
+                raise ValueError(f"Unsupported param type for '{name}': {param_type}")
+
+        return normalized
+
     def fit(self, X: np.ndarray, y: np.ndarray) -> "RandomizedSearchCV":
         """
         Run randomized search hyperparameter tuning.
@@ -77,7 +114,7 @@ class RandomizedSearchCV:
         """
         self.search = SklearnRandomizedSearchCV(
             estimator=self.estimator,
-            param_distributions=self.param_distributions,
+            param_distributions=self._normalize_param_distributions(),
             n_iter=self.n_iter,
             cv=self.cv,
             scoring=self.scoring,
@@ -110,6 +147,12 @@ class RandomizedSearchCV:
         if self.best_model is None:
             raise ValueError("Model has not been fitted yet. Call fit() first.")
         return self.best_model
+
+    def get_search(self) -> SklearnRandomizedSearchCV:
+        """Get the fitted sklearn RandomizedSearchCV object."""
+        if self.search is None:
+            raise ValueError("Model has not been fitted yet. Call fit() first.")
+        return self.search
     
     def predict(self, X: np.ndarray) -> np.ndarray:
         """Make predictions using the best model."""
@@ -132,7 +175,7 @@ class OptunaSearchCV:
         param_distributions: Dict[str, Dict[str, Any]],
         cv: int = 5,
         scoring: Optional[str] = None,
-        n_trials: int = 100,
+        n_trials: int = 20,
         timeout: Optional[int] = None,
         random_state: int = 42,
         verbose: int = 1,

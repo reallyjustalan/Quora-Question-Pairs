@@ -51,10 +51,39 @@ def _metrics_dict(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
     }
 
 
+def _extract_optimal_hyperparameters(model) -> dict | None:
+        """
+        Return tuned hyperparameters if the model exposes them, else None.
+
+        Expected shape in model.get_config():
+            {
+                "tuning": {
+                    "enabled": true,
+                    "best_params": {...}
+                }
+            }
+        """
+        if not hasattr(model, "get_config"):
+                return None
+
+        try:
+                config = model.get_config()
+        except Exception:
+                return None
+
+        tuning = config.get("tuning") if isinstance(config, dict) else None
+        if not isinstance(tuning, dict) or not tuning.get("enabled", False):
+                return None
+
+        best_params = tuning.get("best_params")
+        return best_params if isinstance(best_params, dict) else None
+
+
 def _format_metrics_block(
     experiment_name: str,
     model_name: str,
     feature_names: list[str],
+    optimal_hyperparams: dict | None,
     threshold: float,
     y_true: np.ndarray,
     y_pred: np.ndarray,
@@ -69,6 +98,11 @@ def _format_metrics_block(
         f"Model      : {model_name}",
         f"Run at     : {run_at}",
         f"Threshold  : {threshold:.4f}",
+        (
+            f"Hyperparameters: {json.dumps(optimal_hyperparams, sort_keys=True)}"
+            if optimal_hyperparams
+            else "Hyperparameters: None"
+        ),
         f"Features   : {len(feature_names)}  ({', '.join(feature_names)})",
         f"Test size  : {len(y_true)}",
         "-" * 60,
@@ -129,12 +163,14 @@ def generate_report(
     m = _metrics_dict(y_true, y_pred)
 
     model_name = getattr(model, "name", type(model).__name__)
+    optimal_hyperparams = _extract_optimal_hyperparameters(model)
 
     # ------------------------------------------------------------------
     # 1. Print to stdout
     # ------------------------------------------------------------------
     block = _format_metrics_block(
         experiment_name, model_name, feature_names,
+        optimal_hyperparams,
         threshold, y_true, y_pred, run_at,
     )
     print(block, flush=True)
@@ -186,6 +222,7 @@ def generate_report(
         "run_at": run_at,
         "model": model_name,
         "threshold": threshold,
+        "optimal_hyperparameters": optimal_hyperparams,
         "test_size": int(len(y_true)),
         "cli_args": cli_args or {},
     }
