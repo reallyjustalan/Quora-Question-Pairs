@@ -1,0 +1,6 @@
+outs:
+- md5: 0b28a9c79a59f52840becc326107b1c0.dir
+  size: 3798124
+  nfiles: 34
+  hash: md5
+  path: cross_encoder_scores.zarr
