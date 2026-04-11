@@ -16,7 +16,8 @@ Optional flags:
     --threshold  FLOAT  Decision threshold (default: model's own, else 0.5)
     --tune              Force hyperparameter tuning when supported by model
     --no-tune           Skip hyperparameter tuning even if model supports it
-    --zarr       PATH   Path to embeddings.zarr (default: ../embeddings.zarr)
+    --zarr              PATH   Path to embeddings.zarr (default: ../embeddings.zarr)
+    --cross-encoder-zarr PATH  Path to cross_encoder_scores.zarr (default: ../cross_encoder_scores.zarr)
     --split-file PATH   Path to .npz split file (default: splits/default_split.npz)
     --results-dir PATH  Where to write reports (default: results/)
     --dvc-push          If set, runs `uv run dvc push experiments/results` after reporting
@@ -50,7 +51,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 from data import load_pairs
 from report import generate_report
-from models import CatBoostModel, CosineBaseline, EnsembleModel, LogRegModel, XGBoostModel, RandomForestModel, RandomForestTopKModel, GRUModel, GRUModelV2, GRUModelV3
+from models import CatBoostModel, CosineBaseline, EnsembleModel, LogRegModel, XGBoostModel, RandomForestModel, RandomForestTopKModel, GRUModel, GRUModelV2, GRUModelV3, GRUModelV4
 
 # ---------------------------------------------------------------------------
 # Registry — maps CLI --model name → model instance
@@ -66,6 +67,7 @@ MODEL_REGISTRY: dict[str, object] = {
     "gru":    GRUModel(),
     "gru_v2": GRUModelV2(),
     "gru_v3": GRUModelV3(),
+    "gru_v4": GRUModelV4(),
     # ------------------------------------------------------------------
     # Ensemble models
     # ------------------------------------------------------------------
@@ -157,6 +159,16 @@ def parse_args() -> argparse.Namespace:
         default=None,
         metavar="PATH",
         help="Path to embeddings.zarr. Defaults to ../embeddings.zarr relative to this script.",
+    )
+    parser.add_argument(
+        "--cross-encoder-zarr",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Path to cross_encoder_scores.zarr. "
+            "Defaults to ../cross_encoder_scores.zarr relative to this script. "
+            "Only used by models that request cross-encoder scores (e.g. gru_v4)."
+        ),
     )
     parser.add_argument(
         "--split-file",
@@ -269,9 +281,10 @@ def run(args: argparse.Namespace) -> None:
     threshold       = args.threshold if args.threshold is not None else getattr(model, "threshold", 0.5)
 
     script_dir  = os.path.dirname(__file__)
-    zarr_path   = args.zarr        or os.path.join(script_dir, "..", "embeddings.zarr")
-    split_file  = args.split_file  or os.path.join(script_dir, "splits", "default_split.npz")
-    results_dir = args.results_dir or os.path.join(script_dir, "results")
+    zarr_path        = args.zarr               or os.path.join(script_dir, "..", "embeddings.zarr")
+    cross_enc_path   = args.cross_encoder_zarr or os.path.join(script_dir, "..", "cross_encoder_scores.zarr")
+    split_file       = args.split_file         or os.path.join(script_dir, "splits", "default_split.npz")
+    results_dir      = args.results_dir        or os.path.join(script_dir, "results")
 
     t0 = time.time()
     print(f"\n{'='*60}", flush=True)
@@ -288,6 +301,13 @@ def run(args: argparse.Namespace) -> None:
     # ------------------------------------------------------------------
     # 2. Build features (model owns this step)
     # ------------------------------------------------------------------
+    # Propagate the resolved cross-encoder zarr path into any model that
+    # carries a cfg dict with a "cross_encoder_zarr" key (e.g. GRUModelV4).
+    # This mirrors how zarr_path is resolved here and passed to load_pairs(),
+    # keeping all path resolution in one place rather than inside model files.
+    if hasattr(model, "cfg") and "cross_encoder_zarr" in model.cfg:
+        model.cfg["cross_encoder_zarr"] = cross_enc_path
+
     print(f"\n[run] Building features with {getattr(model, 'name', type(model).__name__)}...", flush=True)
     X, y, feature_names = model.build_features(records)
     print(f"[run] Feature matrix: {X.shape}  labels: {y.shape}", flush=True)
@@ -347,8 +367,9 @@ def run(args: argparse.Namespace) -> None:
         "test_size":   args.test_size,
         "threshold":   args.threshold,
         "tune":        args.tune,
-        "zarr":        zarr_path,
-        "split_file":  split_file,
+        "zarr":               zarr_path,
+        "cross_encoder_zarr": cross_enc_path,
+        "split_file":         split_file,
         "results_dir": results_dir,
         "dvc_push":    args.dvc_push,
         "dvc_push_target": args.dvc_push_target,
