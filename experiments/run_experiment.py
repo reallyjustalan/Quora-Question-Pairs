@@ -345,6 +345,7 @@ def run(args: argparse.Namespace) -> None:
     if do_tune:
         print("[run] Hyperparameter tuning enabled.", flush=True)
         model.tune(X_train, y_train)
+        model.tune_optuna(X_train, y_train)
     else:
         print("[run] Hyperparameter tuning skipped.", flush=True)
 

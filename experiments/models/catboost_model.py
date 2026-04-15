@@ -20,6 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from data import PairRecord
 from features import build_matrix, matryoshka_all_features, DEFAULT_MATRYOSHKA_DIMS
 from hyperparameter_tuning import RandomizedSearchCV
+from hyperparameter_tuning import OptunaSearchCV
 
 
 # Default hyper-parameters — override by subclassing or passing kwargs to __init__
@@ -124,6 +125,29 @@ class CatBoostModel:
             "best_params": best_params,
         }
     
+    def tune_optuna(self, X: np.ndarray, y: np.ndarray) -> None:
+        tuner = OptunaSearchCV(
+            estimator=CatBoostClassifier(**_DEFAULTS),
+            param_distributions=param_space,
+            n_iter=20,
+            cv=5,
+            scoring="f1",
+            random_state=42,
+            n_jobs=-1,
+        )
+        tuner.fit(X, y)
+        best_params = tuner.get_best_params()
+        best_score = tuner.get_best_score()
+        print("Best hyperparameters:", best_params)
+        self._params.update(best_params)
+        self._model.set_params(**best_params)
+        self._tuning_info = {
+            "enabled": True,
+            "method": "OptunaSearchCV",
+            "best_cv_score": float(best_score),
+            "best_params": best_params,
+        }
+
     def fit(self, X_train: np.ndarray, y_train: np.ndarray) -> None:
         self._model.fit(X_train, y_train)
 
