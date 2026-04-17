@@ -44,7 +44,7 @@ param_space = {'max_depth': {'type': 'int', 'low': 3, 'high': 12},
                 'n_estimators': {'type': 'int', 'low': 100, 'high': 1000},
                'subsample': {'type': 'float', 'low': 0.5, 'high': 1.0}, #prevents overfitting by sampling a fraction of training data
                'colsample_bytree': {'type': 'float', 'low': 0.5, 'high': 1.0}, #prevents overfitting by sampling a fraction of features
-               'reg_lambda': {'type': 'float', 'low': 1e-2, 'high': 100.0, 'log': True} #regularisation strength (L2)
+               'reg_alpha': {'type': 'float', 'low': 1e-2, 'high': 100.0, 'log': True} #regularisation strength (L2)
                }
 
 
