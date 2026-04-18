@@ -280,8 +280,23 @@ class OptunaSearchCV:
         for fold_idx, (train_idx, val_idx) in enumerate(skf.split(X, y)):
             X_train, X_val = X[train_idx], X[val_idx]
             y_train, y_val = y[train_idx], y[val_idx]
-            
-            model.fit(X_train, y_train)
+
+            try:
+                model.fit(X_train, y_train)
+            except ValueError as exc:
+                message = str(exc)
+                if "validation dataset" not in message and "early stopping" not in message:
+                    raise
+
+                # Some estimators (notably XGBoost/CatBoost when early stopping is enabled)
+                # require a validation set during fit(). Use the held-out CV fold as the
+                # validation data for this trial.
+                model.fit(
+                    X_train,
+                    y_train,
+                    eval_set=[(X_val, y_val)],
+                    verbose=False,
+                )
             
             # Calculate score for this fold
             if scorer:
