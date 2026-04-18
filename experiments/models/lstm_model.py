@@ -216,7 +216,7 @@ class LSTMModel:
 
     # -- interface: fit ------------------------------------------------------
 
-    def fit(self, X_train: np.ndarray, y_train: np.ndarray) -> None:
+    def fit(self, X_train: np.ndarray, y_train: np.ndarray) -> float:
         torch.manual_seed(self.cfg["seed"])
         np.random.seed(self.cfg["seed"])
 
@@ -368,6 +368,29 @@ class LSTMModel:
                 f"  [LSTM] Restored best checkpoint (val={best_val_loss:.4f})",
                 flush=True,
             )
+
+        # ---- compute val F1 on best checkpoint --------------------------- #
+        from sklearn.metrics import f1_score as _f1_score
+        self._model.eval()
+        all_preds: list[np.ndarray] = []
+        all_labels: list[np.ndarray] = []
+        with torch.no_grad():
+            for e1, e2, sc, lab in val_loader:
+                e1  = e1.to(self._device)
+                e2  = e2.to(self._device)
+                sc  = sc.to(self._device)
+                proba = torch.sigmoid(
+                    self._model(e1, e2, sc)
+                ).cpu().numpy().flatten()
+                all_preds.append((proba >= self.threshold).astype(int))
+                all_labels.append(lab.numpy())
+        val_f1 = float(_f1_score(
+            np.concatenate(all_labels),
+            np.concatenate(all_preds),
+            zero_division=0,
+        ))
+        print(f"  [LSTM] Val F1 (threshold={self.threshold}): {val_f1:.4f}", flush=True)
+        return val_f1
 
     # -- interface: predict_proba --------------------------------------------
 
