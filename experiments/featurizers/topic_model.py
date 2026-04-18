@@ -45,6 +45,7 @@ Usage
 
 from __future__ import annotations
 
+import time
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -55,6 +56,21 @@ from sklearn.preprocessing import Normalizer
 
 if TYPE_CHECKING:
     from data import PairRecord
+
+
+_LOG_PREFIX = "[TopicModelFeaturizer]"
+
+
+def _fmt_secs(seconds: float) -> str:
+    """Format seconds as a short human-readable string."""
+    s = int(seconds)
+    m, s = divmod(s, 60)
+    h, m = divmod(m, 60)
+    if h:
+        return f"{h}h {m:02d}m {s:02d}s"
+    if m:
+        return f"{m}m {s:02d}s"
+    return f"{seconds:.2f}s"
 
 
 # ---------------------------------------------------------------------------
@@ -96,6 +112,8 @@ class TopicModelFeaturizer:
         Maximum EM iterations for LDA.
     random_state : int
         RNG seed for reproducibility.
+    verbose : bool
+        If True (default), print progress logs during fit / caching.
     """
 
     def __init__(
@@ -104,11 +122,14 @@ class TopicModelFeaturizer:
         max_tfidf_features: int | None = 50_000,
         lda_max_iter: int = 10,
         random_state: int = 42,
+        *,
+        verbose: bool = True,
     ) -> None:
         self._n_components = n_components
         self._max_tfidf_features = max_tfidf_features
         self._lda_max_iter = lda_max_iter
         self._random_state = random_state
+        self._verbose = verbose
 
         self._fitted = False
 
@@ -120,6 +141,14 @@ class TopicModelFeaturizer:
         # Caches: question → embedding vector
         self._lsi_cache: dict[str, np.ndarray] = {}  # L2-normalised LSI vector
         self._lda_cache: dict[str, np.ndarray] = {}  # raw (sums-to-1) LDA vector
+
+    # ------------------------------------------------------------------
+    # Logging helper
+    # ------------------------------------------------------------------
+
+    def _log(self, msg: str) -> None:
+        if self._verbose:
+            print(f"{_LOG_PREFIX} {msg}", flush=True)
 
     # ------------------------------------------------------------------
     # Fit
@@ -138,7 +167,19 @@ class TopicModelFeaturizer:
         -------
         self
         """
-        print("[TopicModelFeaturizer] Fitting TF-IDF for LSI …", flush=True)
+        t_total = time.time()
+        n_docs = len(questions)
+        n_unique = len(set(questions))
+        self._log(
+            f"fit(): starting on {n_docs:,} questions ({n_unique:,} unique) | "
+            f"n_components={self._n_components}, "
+            f"max_tfidf_features={self._max_tfidf_features}, "
+            f"lda_max_iter={self._lda_max_iter}"
+        )
+
+        # ---- LSI pipeline (TF-IDF -> TruncatedSVD -> L2-normalise) ------
+        self._log("fit(): [1/4] Fitting TF-IDF vectorizer for LSI …")
+        t_stage = time.time()
         tfidf_lsi = TfidfVectorizer(
             max_features=self._max_tfidf_features,
             sublinear_tf=True,
@@ -156,24 +197,42 @@ class TopicModelFeaturizer:
             ("l2norm",  normalizer),
         ])
 
-        print("[TopicModelFeaturizer] Fitting LSI (TruncatedSVD) …", flush=True)
+        self._log(
+            f"fit(): [2/4] Fitting LSI pipeline (TF-IDF → TruncatedSVD[k={self._n_components}] → L2-norm) …"
+        )
         self._lsi_pipeline.fit(questions)
+        lsi_vocab = len(tfidf_lsi.vocabulary_)
+        try:
+            explained = float(svd.explained_variance_ratio_.sum())
+        except Exception:
+            explained = float("nan")
+        self._log(
+            f"fit(): [2/4] LSI done in {_fmt_secs(time.time() - t_stage)} | "
+            f"tfidf_vocab={lsi_vocab:,}, "
+            f"svd_explained_variance_ratio_sum={explained:.4f}"
+        )
 
-        # LDA uses a plain count/TF-IDF matrix (LDA prefers raw counts or
-        # non-sublinear TF).  We use a separate TfidfVectorizer without sublinear_tf.
-        print("[TopicModelFeaturizer] Fitting TF-IDF for LDA …", flush=True)
+        # ---- LDA: uses a plain TF-IDF (non-sublinear) or count matrix ----
+        self._log("fit(): [3/4] Fitting TF-IDF vectorizer for LDA …")
+        t_stage = time.time()
         self._lda_tfidf = TfidfVectorizer(
             max_features=self._max_tfidf_features,
             sublinear_tf=False,   # LDA works better with raw TF or tf (not log-tf)
             smooth_idf=True,
         )
         X_lda = self._lda_tfidf.fit_transform(questions)
-
-        print(
-            f"[TopicModelFeaturizer] Fitting LDA "
-            f"(n_components={self._n_components}, max_iter={self._lda_max_iter}) …",
-            flush=True,
+        self._log(
+            f"fit(): [3/4] LDA TF-IDF done in {_fmt_secs(time.time() - t_stage)} | "
+            f"tfidf_vocab={len(self._lda_tfidf.vocabulary_):,}, "
+            f"matrix_shape={X_lda.shape}, nnz={X_lda.nnz:,}"
         )
+
+        self._log(
+            f"fit(): [4/4] Fitting LDA "
+            f"(n_components={self._n_components}, max_iter={self._lda_max_iter}, "
+            f"learning_method='batch') — this is usually the slowest stage …"
+        )
+        t_stage = time.time()
         self._lda_model = LatentDirichletAllocation(
             n_components=self._n_components,
             max_iter=self._lda_max_iter,
@@ -181,11 +240,29 @@ class TopicModelFeaturizer:
             random_state=self._random_state,
         )
         self._lda_model.fit(X_lda)
+        lda_perp = float("nan")
+        try:
+            lda_perp = float(self._lda_model.perplexity(X_lda))
+        except Exception:
+            pass
+        self._log(
+            f"fit(): [4/4] LDA done in {_fmt_secs(time.time() - t_stage)} | "
+            f"n_iter={self._lda_model.n_iter_}, "
+            f"bound={self._lda_model.bound_:.3f}, "
+            f"perplexity={lda_perp:.3f}"
+        )
         self._fitted = True
 
         # Pre-cache all training questions
+        self._log(
+            f"fit(): pre-caching topic vectors for {n_unique:,} unique training questions …"
+        )
         self.cache_questions(questions)
-        print("[TopicModelFeaturizer] Done fitting.", flush=True)
+
+        self._log(
+            f"fit(): done in {_fmt_secs(time.time() - t_total)} "
+            f"(LSI cache={len(self._lsi_cache):,}, LDA cache={len(self._lda_cache):,})"
+        )
         return self
 
     # ------------------------------------------------------------------
@@ -202,24 +279,52 @@ class TopicModelFeaturizer:
         assert self._lda_tfidf is not None
         assert self._lda_model is not None
 
+        t0 = time.time()
+        n_requested = len(questions)
         unique = [q for q in dict.fromkeys(questions) if q not in self._lsi_cache]
+        n_new = len(unique)
+        n_cached_hits = n_requested - n_new if n_requested >= n_new else 0
+
         if not unique:
+            self._log(
+                f"cache_questions(): nothing to do "
+                f"({n_requested:,} requested, all already cached)"
+            )
             return
 
+        self._log(
+            f"cache_questions(): embedding {n_new:,} new questions "
+            f"({n_requested:,} requested, {n_cached_hits:,} already in cache) "
+            f"into LSI + LDA topic spaces (k={self._n_components}) …"
+        )
+
         # LSI embeddings (already L2-normalised by the pipeline)
+        t_lsi = time.time()
         lsi_vecs = self._lsi_pipeline.transform(unique).astype(np.float32)
+        lsi_elapsed = time.time() - t_lsi
 
         # LDA embeddings — transform gives un-normalised expected topic counts;
         # normalise to a probability simplex (rows sum to 1)
+        t_lda = time.time()
         lda_raw  = self._lda_model.transform(
             self._lda_tfidf.transform(unique)
         ).astype(np.float32)
         lda_sums = lda_raw.sum(axis=1, keepdims=True)
         lda_vecs = lda_raw / np.clip(lda_sums, 1e-12, None)
+        lda_elapsed = time.time() - t_lda
 
         for q, lsi_v, lda_v in zip(unique, lsi_vecs, lda_vecs):
             self._lsi_cache[q] = lsi_v
             self._lda_cache[q] = lda_v
+
+        elapsed = time.time() - t0
+        rate = n_new / elapsed if elapsed > 0 else float("inf")
+        self._log(
+            f"cache_questions(): cached {n_new:,} questions in {_fmt_secs(elapsed)} "
+            f"(LSI {_fmt_secs(lsi_elapsed)} + LDA {_fmt_secs(lda_elapsed)}, "
+            f"{rate:,.0f} q/s) | "
+            f"total cache size={len(self._lsi_cache):,}"
+        )
 
     # ------------------------------------------------------------------
     # Internal helpers

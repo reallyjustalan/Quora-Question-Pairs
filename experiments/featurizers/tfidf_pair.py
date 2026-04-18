@@ -65,6 +65,7 @@ Usage example
 from __future__ import annotations
 
 import re
+import time
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -84,6 +85,20 @@ _IDF_RARE_PERCENTILE: float = 75.0
 
 # Number of top-IDF words to look at for feature (D).
 _TOP_K_ALIGNMENT: int = 3
+
+_LOG_PREFIX = "[TfidfPairFeaturizer]"
+
+
+def _fmt_secs(seconds: float) -> str:
+    """Format seconds as a short human-readable string."""
+    s = int(seconds)
+    m, s = divmod(s, 60)
+    h, m = divmod(m, 60)
+    if h:
+        return f"{h}h {m:02d}m {s:02d}s"
+    if m:
+        return f"{m}m {s:02d}s"
+    return f"{seconds:.2f}s"
 
 
 # ---------------------------------------------------------------------------
@@ -113,6 +128,8 @@ class TfidfPairFeaturizer:
         vocabulary are considered "rare" for feature (C).
     top_k_alignment : int
         Number of highest-IDF tokens per question used in feature (D).
+    verbose : bool
+        If True (default), print progress logs during fit / caching.
 
     Attributes (available after fit)
     ----------
@@ -128,11 +145,13 @@ class TfidfPairFeaturizer:
         top_k_alignment: int = _TOP_K_ALIGNMENT,
         *,
         sublinear_tf: bool = True,
+        verbose: bool = True,
     ) -> None:
         self._max_features = max_features
         self._idf_rare_percentile = float(idf_rare_percentile)
         self._top_k = int(top_k_alignment)
         self._sublinear_tf = sublinear_tf
+        self._verbose = verbose
 
         self._vectorizer: TfidfVectorizer | None = None
         self.vocab_: dict[str, int] = {}
@@ -142,6 +161,14 @@ class TfidfPairFeaturizer:
 
         # Cache: question string → dense L2-normalised TF-IDF vector
         self._vec_cache: dict[str, np.ndarray] = {}
+
+    # ------------------------------------------------------------------
+    # Logging helper
+    # ------------------------------------------------------------------
+
+    def _log(self, msg: str) -> None:
+        if self._verbose:
+            print(f"{_LOG_PREFIX} {msg}", flush=True)
 
     # ------------------------------------------------------------------
     # Fit
@@ -166,6 +193,15 @@ class TfidfPairFeaturizer:
         -------
         self  (for chaining)
         """
+        t0 = time.time()
+        n_docs = len(questions)
+        n_unique = len(set(questions))
+        self._log(
+            f"fit(): starting TF-IDF fit on {n_docs:,} questions "
+            f"({n_unique:,} unique) | "
+            f"max_features={self._max_features}, sublinear_tf={self._sublinear_tf}"
+        )
+
         tfidf = TfidfVectorizer(
             tokenizer=_tokenize,
             token_pattern=None,         # we supply our own tokenizer
@@ -184,9 +220,24 @@ class TfidfPairFeaturizer:
         )
         self._fitted = True
 
+        fit_elapsed = time.time() - t0
+        self._log(
+            f"fit(): TF-IDF fit complete in {_fmt_secs(fit_elapsed)} | "
+            f"vocab_size={len(self.vocab_):,} | "
+            f"idf range=[{float(self.idf_.min()):.3f}, {float(self.idf_.max()):.3f}] | "
+            f"rare-word IDF threshold (p{self._idf_rare_percentile:.0f})="
+            f"{self._idf_rare_threshold:.3f}"
+        )
+
         # Pre-compute & cache vectors for all training questions
+        self._log(f"fit(): pre-caching vectors for {n_unique:,} unique training questions …")
         self.cache_questions(questions)
 
+        total_elapsed = time.time() - t0
+        self._log(
+            f"fit(): done in {_fmt_secs(total_elapsed)} "
+            f"(cache size={len(self._vec_cache):,} vectors)"
+        )
         return self
 
     def cache_questions(self, questions: list[str]) -> None:
@@ -203,9 +254,24 @@ class TfidfPairFeaturizer:
         self._check_fitted()
         assert self._vectorizer is not None
 
+        t0 = time.time()
+        n_requested = len(questions)
         unique = list({q for q in questions if q not in self._vec_cache})
+        n_new = len(unique)
+        n_cached_hits = n_requested - n_new if n_requested >= n_new else 0
+
         if not unique:
+            self._log(
+                f"cache_questions(): nothing to do "
+                f"({n_requested:,} requested, all already cached)"
+            )
             return
+
+        self._log(
+            f"cache_questions(): transforming {n_new:,} new questions "
+            f"({n_requested:,} requested, {n_cached_hits:,} already in cache) | "
+            f"vocab_size={len(self.vocab_):,}"
+        )
 
         sparse = self._vectorizer.transform(unique)   # (n, vocab)
         dense  = sparse.toarray().astype(np.float32)
@@ -216,6 +282,13 @@ class TfidfPairFeaturizer:
         for q, raw_vec, norm_vec in zip(unique, dense, normed):
             # Store both raw (for diff features) and normalised (for cosine)
             self._vec_cache[q] = (raw_vec, norm_vec)
+
+        elapsed = time.time() - t0
+        rate = n_new / elapsed if elapsed > 0 else float("inf")
+        self._log(
+            f"cache_questions(): cached {n_new:,} vectors in {_fmt_secs(elapsed)} "
+            f"({rate:,.0f} q/s) | total cache size={len(self._vec_cache):,}"
+        )
 
     # ------------------------------------------------------------------
     # Internal helpers
