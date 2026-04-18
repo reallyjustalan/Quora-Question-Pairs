@@ -11,6 +11,7 @@ from .gru_model import GRUModel
 from .gru_model_v2 import GRUModelV2
 from .gru_model_v3 import GRUModelV3
 from .gru_model_v4 import GRUModelV4
+from .lstm_model import LSTMModel
 
 __all__ = [
     "CatBoostModel",
@@ -24,4 +25,5 @@ __all__ = [
     "GRUModelV2",
     "GRUModelV3",
     "GRUModelV4",
+    "LSTMModel",
 ]

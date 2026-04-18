@@ -51,7 +51,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 from data import load_pairs
 from report import generate_report
-from models import CatBoostModel, CosineBaseline, EnsembleModel, LogRegModel, XGBoostModel, RandomForestModel, RandomForestTopKModel, GRUModel, GRUModelV2, GRUModelV3, GRUModelV4
+from models import CatBoostModel, CosineBaseline, EnsembleModel, LogRegModel, XGBoostModel, RandomForestModel, RandomForestTopKModel, GRUModel, GRUModelV2, GRUModelV3, GRUModelV4, LSTMModel
 
 # ---------------------------------------------------------------------------
 # Registry — maps CLI --model name → model instance
@@ -68,6 +68,7 @@ MODEL_REGISTRY: dict[str, object] = {
     "gru_v2": GRUModelV2(),
     "gru_v3": GRUModelV3(),
     "gru_v4": GRUModelV4(),
+    "lstm":   LSTMModel(),
     # ------------------------------------------------------------------
     # Ensemble models
     # ------------------------------------------------------------------
