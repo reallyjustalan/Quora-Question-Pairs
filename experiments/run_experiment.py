@@ -16,8 +16,14 @@ Optional flags:
     --threshold  FLOAT  Decision threshold (default: model's own, else 0.5)
     --tune-random       Run RandomizedSearchCV tuning when supported by model
     --tune-optuna       Run OptunaSearchCV tuning when supported by model
+                        (deprecated — prefer running experiments/tune.py, then
+                         passing the resulting best_params.json via --params-file)
     --no-tune           Skip hyperparameter tuning
+    --params-file PATH  Load hyperparameters from a JSON file produced by
+                        experiments/tune.py (mutually exclusive with --tune-*).
+                        Example: results/tuning/<name>/best_params.json
     --zarr              PATH   Path to embeddings.zarr (default: ../embeddings.zarr)
+
     --cross-encoder-zarr PATH  Path to cross_encoder_scores.zarr (default: ../cross_encoder_scores.zarr)
     --split-file PATH   Path to .npz split file (default: splits/default_split.npz)
     --results-dir PATH  Where to write reports (default: results/)
@@ -39,10 +45,12 @@ ADDING A NEW MODEL
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 import sys
 import time
+
 
 import numpy as np
 from sklearn.model_selection import train_test_split
@@ -52,7 +60,12 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 from data import load_pairs
 from report import generate_report
-from models import CatBoostModel, CosineBaseline, EnsembleModel, LogRegModel, XGBoostModel, RandomForestModel, RandomForestTopKModel, GRUModel, GRUModelV2, GRUModelV3, GRUModelV4
+from models import (
+    CatBoostModel, CosineBaseline, EnsembleModel, LogRegModel,
+    XGBoostModel, XGBoostClassicalModel,
+    RandomForestModel, RandomForestTopKModel,
+    GRUModel, GRUModelV2, GRUModelV3, GRUModelV4,
+)
 
 # ---------------------------------------------------------------------------
 # Registry — maps CLI --model name → model instance
@@ -60,6 +73,7 @@ from models import CatBoostModel, CosineBaseline, EnsembleModel, LogRegModel, XG
 
 MODEL_REGISTRY: dict[str, object] = {
     "xgboost": XGBoostModel(),
+    "xgboost_classical": XGBoostClassicalModel(),
     "catboost": CatBoostModel(),
     "logreg":   LogRegModel(),
     "cosine":   CosineBaseline(),
@@ -163,7 +177,19 @@ def parse_args() -> argparse.Namespace:
         const="none",
         help="Skip hyperparameter tuning.",
     )
-    parser.set_defaults(tune_mode="none")
+    tune_group.add_argument(
+        "--params-file",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Path to a best_params.json file produced by experiments/tune.py. "
+            "When provided, the model's hyperparameters are loaded from this file "
+            "and no in-process tuning is performed. This is the recommended "
+            "MLOps workflow: run tune.py once, then feed its output here."
+        ),
+    )
+    parser.set_defaults(tune_mode="none", params_file=None)
+
     parser.add_argument(
         "--zarr",
         default=None,
@@ -309,23 +335,36 @@ def run(args: argparse.Namespace) -> None:
     records = load_pairs(zarr_file=zarr_path, max_rows=max_rows)
 
     # ------------------------------------------------------------------
-    # 2. Build features (model owns this step)
+    # 2. Resolve the train/test split BEFORE building features.
+    #
+    #    Models whose featurizers must be fit on training data only
+    #    (e.g. XGBoostClassicalModel) need the split indices available
+    #    at feature-build time.  We extract labels cheaply from the raw
+    #    records to seed stratified splitting without calling build_features
+    #    yet.
+    # ------------------------------------------------------------------
+    y_labels = np.array([r.label for r in records], dtype=np.int32)
+    train_idx, test_idx = _get_split(len(records), y_labels, split_file, test_size)
+
+    # ------------------------------------------------------------------
+    # 3. Build features (model owns this step)
     # ------------------------------------------------------------------
     # Propagate the resolved cross-encoder zarr path into any model that
     # carries a cfg dict with a "cross_encoder_zarr" key (e.g. GRUModelV4).
-    # This mirrors how zarr_path is resolved here and passed to load_pairs(),
-    # keeping all path resolution in one place rather than inside model files.
     if hasattr(model, "cfg") and "cross_encoder_zarr" in model.cfg:
         model.cfg["cross_encoder_zarr"] = cross_enc_path
 
     print(f"\n[run] Building features with {getattr(model, 'name', type(model).__name__)}...", flush=True)
-    X, y, feature_names = model.build_features(records)
-    print(f"[run] Feature matrix: {X.shape}  labels: {y.shape}", flush=True)
 
-    # ------------------------------------------------------------------
-    # 3. Fixed train/test split (saved on first run, reused thereafter)
-    # ------------------------------------------------------------------
-    train_idx, test_idx = _get_split(len(records), y, split_file, test_size)
+    import inspect as _inspect
+    _bf_sig = _inspect.signature(model.build_features)
+    if "train_idx" in _bf_sig.parameters:
+        # Model supports split-aware build (featurizers fit on train only)
+        X, y, feature_names = model.build_features(records, train_idx=train_idx)
+    else:
+        X, y, feature_names = model.build_features(records)
+
+    print(f"[run] Feature matrix: {X.shape}  labels: {y.shape}", flush=True)
 
     X_train, X_test = X[train_idx], X[test_idx]
     y_train, y_test = y[train_idx], y[test_idx]
@@ -334,8 +373,48 @@ def run(args: argparse.Namespace) -> None:
     print(f"[run] Train: {len(train_idx)}  Test: {len(test_idx)}", flush=True)
 
     # ------------------------------------------------------------------
-    # 4. Fit
+    # 4. Fit  (hyperparameter loading / tuning, then model.fit)
     # ------------------------------------------------------------------
+    # Load tuned hyperparameters from a JSON file produced by experiments/tune.py.
+    # This is the preferred MLOps workflow: tuning and evaluation are separate
+    # stages. The evaluation run here does NO hyperparameter search of its own —
+    # it just applies the params discovered earlier, then fits and reports.
+    if args.params_file is not None:
+        if not os.path.exists(args.params_file):
+            raise FileNotFoundError(f"--params-file not found: {args.params_file}")
+        with open(args.params_file, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+
+        best_params = payload.get("best_params")
+        if not isinstance(best_params, dict):
+            raise ValueError(
+                f"{args.params_file} does not contain a 'best_params' dict. "
+                "Expected the schema written by experiments/tune.py."
+            )
+        tuned_for = payload.get("model")
+        if tuned_for is not None and tuned_for != args.model:
+            print(
+                f"[run] WARNING: --params-file was produced for model '{tuned_for}', "
+                f"but this run uses '{args.model}'. Params may be incompatible.",
+                flush=True,
+            )
+        if not hasattr(model, "apply_tuned_params"):
+            raise RuntimeError(
+                f"Model '{args.model}' does not implement apply_tuned_params(); "
+                "cannot consume --params-file for this model."
+            )
+        print(
+            f"[run] Loading tuned hyperparameters from {args.params_file} "
+            f"(best_score={payload.get('best_score')}, method={payload.get('method')}).",
+            flush=True,
+        )
+        model.apply_tuned_params(
+            best_params,
+            source=os.path.abspath(args.params_file),
+            cv_score=payload.get("best_score"),
+            method=payload.get("method", "external"),
+        )
+
     print(f"\n[run] Fitting model...", flush=True)
     t_fit = time.time()
     if args.tune_mode == "random":
@@ -350,7 +429,12 @@ def run(args: argparse.Namespace) -> None:
             )
     elif args.tune_mode == "optuna":
         if hasattr(model, "tune_optuna"):
-            print("[run] Hyperparameter tuning enabled (OptunaSearchCV).", flush=True)
+            print(
+                "[run] Hyperparameter tuning enabled (OptunaSearchCV). "
+                "NOTE: For better MLOps hygiene, prefer running experiments/tune.py "
+                "once and re-using its best_params.json via --params-file.",
+                flush=True,
+            )
             model.tune_optuna(X_train, y_train)
         else:
             print(
@@ -359,19 +443,21 @@ def run(args: argparse.Namespace) -> None:
                 flush=True,
             )
     else:
-        print("[run] Hyperparameter tuning skipped.", flush=True)
+        if args.params_file is None:
+            print("[run] Hyperparameter tuning skipped.", flush=True)
 
     model.fit(X_train, y_train)
+
 
     print(f"[run] Fit complete in {time.time() - t_fit:.1f}s", flush=True)
 
     # ------------------------------------------------------------------
-    # 5. Predict
+    # 6. Predict
     # ------------------------------------------------------------------
     proba = model.predict_proba(X_test)
 
     # ------------------------------------------------------------------
-    # 6. Report
+    # 7. Report
     # ------------------------------------------------------------------
     print(f"\n[run] Generating report...", flush=True)
     cli_args_dict = {
@@ -381,6 +467,7 @@ def run(args: argparse.Namespace) -> None:
         "test_size":   args.test_size,
         "threshold":   args.threshold,
         "tune_mode":   args.tune_mode,
+        "params_file": os.path.abspath(args.params_file) if args.params_file else None,
         "zarr":               zarr_path,
         "cross_encoder_zarr": cross_enc_path,
         "split_file":         split_file,
@@ -388,6 +475,7 @@ def run(args: argparse.Namespace) -> None:
         "dvc_push":    args.dvc_push,
         "dvc_push_target": args.dvc_push_target,
     }
+
     generate_report(
         experiment_name=experiment_name,
         y_true=y_test,

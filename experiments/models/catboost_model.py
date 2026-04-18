@@ -150,7 +150,49 @@ class CatBoostModel:
             "best_params": best_params,
         }
 
+    # ------------------------------------------------------------------
+    # Hooks used by experiments/tune.py (the dedicated tuning entry point)
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def get_tuning_spec(cls) -> dict:
+        """
+        Describe how this model should be tuned.
+
+        Consumed by experiments/tune.py. Returns a fresh estimator seeded with
+        the same _DEFAULTS that __init__ uses, plus the Optuna-style search
+        space and the scoring metric.
+        """
+        return {
+            "estimator":   CatBoostClassifier(**_DEFAULTS),
+            "param_space": param_space,
+            "scoring":     "f1",
+        }
+
+    def apply_tuned_params(
+        self,
+        best_params: dict,
+        *,
+        source: str | None = None,
+        cv_score: float | None = None,
+        method: str = "external",
+    ) -> None:
+        """
+        Apply hyperparameters produced by an out-of-band tuning run
+        (e.g. experiments/tune.py writing best_params.json).
+        """
+        self._params.update(best_params)
+        self._model.set_params(**best_params)
+        self._tuning_info = {
+            "enabled":       True,
+            "method":        method,
+            "best_cv_score": float(cv_score) if cv_score is not None else None,
+            "best_params":   dict(best_params),
+            "source":        source,
+        }
+
     def fit(self, X_train: np.ndarray, y_train: np.ndarray) -> None:
+
         self._model.fit(X_train, y_train)
 
     def predict_proba(self, X_test: np.ndarray) -> np.ndarray:

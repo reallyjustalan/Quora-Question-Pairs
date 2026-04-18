@@ -2,7 +2,7 @@
 featurizers/tfidf_pair.py — Train-fitted TF-IDF featurizer for question pairs.
 
 This featurizer must be fit on a corpus of questions (training data only) before
-it can transform PairRecords.  It computes four groups of IDF-based features:
+it can transform PairRecords.  It computes five groups of IDF-based features:
 
 (B) Weighted word overlap
     weighted_word_overlap — Σ_{w ∈ W} idf(w) / Σ_{w ∈ q1∪q2} idf(w)
@@ -27,6 +27,18 @@ it can transform PairRecords.  It computes four groups of IDF-based features:
     tfidf_diff_l2   — L2 norm of the difference vector
     Interpretation: distributional divergence across the full vocabulary.
 
+(F) TF-IDF vector similarity
+    tfidf_cosine_sim — cosine similarity between the two TF-IDF vectors
+    tfidf_dot        — raw dot product of the (already L2-normalised) TF-IDF vectors
+    Interpretation: A direct similarity measure in TF-IDF space.
+
+Performance note
+----------------
+At transform time, vectors are looked up from a pre-computed cache keyed by
+question string (populated during fit_transform / a warm-up pass), so
+repeated or batched calls are O(1) per pair rather than O(vocab_size).
+For unseen questions the vector is computed on-demand and cached.
+
 Usage example
 -------------
     from featurizers import TfidfPairFeaturizer
@@ -36,6 +48,11 @@ Usage example
     train_questions = [r.question1 for r in train_records] + \
                       [r.question2 for r in train_records]
     featurizer.fit(train_questions)
+
+    # Optionally pre-cache all test questions for speed:
+    test_questions = [r.question1 for r in test_records] + \
+                     [r.question2 for r in test_records]
+    featurizer.cache_questions(test_questions)
 
     # Inside a model's _feature_fn closure:
     def feature_fn(r: PairRecord) -> dict[str, float]:
@@ -123,6 +140,9 @@ class TfidfPairFeaturizer:
         self._idf_rare_threshold: float = 0.0
         self._fitted: bool = False
 
+        # Cache: question string → dense L2-normalised TF-IDF vector
+        self._vec_cache: dict[str, np.ndarray] = {}
+
     # ------------------------------------------------------------------
     # Fit
     # ------------------------------------------------------------------
@@ -132,6 +152,8 @@ class TfidfPairFeaturizer:
         Fit the TF-IDF vocabulary and IDF weights on a list of question strings.
 
         Call this with training questions only (never include test questions).
+        All unique question strings in `questions` are cached automatically so
+        that subsequent transform() calls on training data are O(1).
 
         Parameters
         ----------
@@ -161,7 +183,39 @@ class TfidfPairFeaturizer:
             np.percentile(self.idf_, self._idf_rare_percentile)
         )
         self._fitted = True
+
+        # Pre-compute & cache vectors for all training questions
+        self.cache_questions(questions)
+
         return self
+
+    def cache_questions(self, questions: list[str]) -> None:
+        """
+        Pre-compute and cache TF-IDF vectors for a list of question strings.
+
+        Call this with your test questions after fit() to avoid recomputing
+        vectors on every transform() call.
+
+        Parameters
+        ----------
+        questions : list[str]
+        """
+        self._check_fitted()
+        assert self._vectorizer is not None
+
+        unique = list({q for q in questions if q not in self._vec_cache})
+        if not unique:
+            return
+
+        sparse = self._vectorizer.transform(unique)   # (n, vocab)
+        dense  = sparse.toarray().astype(np.float32)
+        # L2-normalise each row for cosine similarity
+        norms  = np.linalg.norm(dense, axis=1, keepdims=True)
+        normed = dense / np.clip(norms, 1e-12, None)
+
+        for q, raw_vec, norm_vec in zip(unique, dense, normed):
+            # Store both raw (for diff features) and normalised (for cosine)
+            self._vec_cache[q] = (raw_vec, norm_vec)
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -181,14 +235,19 @@ class TfidfPairFeaturizer:
             return 0.0
         return float(self.idf_[idx])
 
-    def _tfidf_vector(self, text: str) -> np.ndarray:
+    def _tfidf_vectors(self, text: str) -> tuple[np.ndarray, np.ndarray]:
         """
-        Return the dense TF-IDF vector for a single text string.
-        Shape: (vocab_size,)
+        Return (raw_vector, l2_normalised_vector) for a single text string.
+        Looks up the cache first; on miss, computes and caches.
         """
         assert self._vectorizer is not None
-        sparse = self._vectorizer.transform([text])
-        return sparse.toarray()[0].astype(np.float32)
+        if text not in self._vec_cache:
+            sparse = self._vectorizer.transform([text])
+            raw = sparse.toarray()[0].astype(np.float32)
+            norm_val = np.linalg.norm(raw)
+            normed = raw / max(norm_val, 1e-12)
+            self._vec_cache[text] = (raw, normed)
+        return self._vec_cache[text]
 
     # ------------------------------------------------------------------
     # Transform
@@ -258,14 +317,20 @@ class TfidfPairFeaturizer:
         # ---------------------------------------------------------------
         # (E) TF-IDF difference vector (reduced)
         # ---------------------------------------------------------------
-        vec1 = self._tfidf_vector(r.question1)
-        vec2 = self._tfidf_vector(r.question2)
+        vec1, norm_vec1 = self._tfidf_vectors(r.question1)
+        vec2, norm_vec2 = self._tfidf_vectors(r.question2)
         diff = np.abs(vec1 - vec2)
 
         tfidf_diff_mean = float(diff.mean())
         tfidf_diff_max  = float(diff.max())
         tfidf_diff_l1   = float(diff.sum())
         tfidf_diff_l2   = float(np.linalg.norm(diff))
+
+        # ---------------------------------------------------------------
+        # (F) TF-IDF vector similarity
+        # ---------------------------------------------------------------
+        tfidf_cosine_sim = float(np.dot(norm_vec1, norm_vec2))
+        tfidf_dot        = float(np.dot(vec1, vec2))
 
         return {
             # (B)
@@ -281,6 +346,9 @@ class TfidfPairFeaturizer:
             "tfidf_diff_max":            tfidf_diff_max,
             "tfidf_diff_l1":             tfidf_diff_l1,
             "tfidf_diff_l2":             tfidf_diff_l2,
+            # (F)
+            "tfidf_cosine_sim":          tfidf_cosine_sim,
+            "tfidf_dot":                 tfidf_dot,
         }
 
     # ------------------------------------------------------------------

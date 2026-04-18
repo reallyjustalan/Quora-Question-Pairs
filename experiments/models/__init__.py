@@ -5,6 +5,7 @@ from .cosine_baseline import CosineBaseline
 from .ensemble_model import EnsembleModel
 from .logreg_model import LogRegModel
 from .xgboost_model import XGBoostModel
+from .xgboost_classical import XGBoostClassicalModel
 from .randomforest_model import RandomForestModel
 from .randomforest_topk_model import RandomForestTopKModel
 from .gru_model import GRUModel
@@ -18,6 +19,7 @@ __all__ = [
     "EnsembleModel",
     "LogRegModel",
     "XGBoostModel",
+    "XGBoostClassicalModel",
     "RandomForestModel",
     "RandomForestTopKModel",
     "GRUModel",

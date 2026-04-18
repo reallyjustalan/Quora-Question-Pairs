@@ -6,10 +6,12 @@ Plug-and-play ML experiment harness for the Quora Question-Pairs project.
 
 ```
 experiments/
-├── data.py              Loads zarr + CSV → list[PairRecord]  (shared, no model logic)
-├── features.py          Primitive feature functions (embedding, lexical, matryoshka)
-├── report.py            Metrics printer + results writer (metrics.txt, config.json, …)
-├── run_experiment.py    ← ENTRY POINT — run this
+├── data.py                  Loads zarr + CSV → list[PairRecord]  (shared, no model logic)
+├── features.py              Primitive feature functions (embedding, lexical, matryoshka)
+├── report.py                Metrics printer + results writer (metrics.txt, config.json, …)
+├── hyperparameter_tuning.py RandomizedSearchCV + OptunaSearchCV wrappers
+├── run_experiment.py        ← ENTRY POINT #1 — evaluate a model on the fixed test split
+├── tune.py                  ← ENTRY POINT #2 — dedicated Optuna hyperparameter search
 │
 ├── models/
 │   ├── catboost_model.py   CatBoost  — matryoshka + lexical features
@@ -22,12 +24,20 @@ experiments/
 │
 └── results/
     ├── all_experiments.csv          one row per completed run
+    ├── tuning/
+    │   └── <tuning_name>/
+    │       ├── best_params.json     ← feed back into run_experiment.py
+    │       ├── study.db             ← resumable Optuna SQLite storage
+    │       ├── trials.csv
+    │       ├── tuning_config.json
+    │       └── plots/
     └── <experiment_name>/
         ├── metrics.txt
         ├── errors.csv
-        ├── config.json              ← NEW: full reproducibility record (see below)
+        ├── config.json              full reproducibility record (see below)
         └── feature_importance.txt
 ```
+
 
 ## Running an experiment
 
@@ -65,7 +75,88 @@ compared on the **same test rows**.
 > `--dvc-push` is intentionally opt-in. This avoids failing local experiments for users
 > who only have read-only DVC access or no write credentials to the remote.
 
+## Hyperparameter tuning
+
+Tuning is deliberately split out into its own entry point (`tune.py`) and is
+treated as a **separate pipeline stage** from evaluation. This keeps
+`run_experiment.py` deterministic — one experiment = one fixed hyperparameter
+set — and lets Optuna operate the way it's designed to: a persistent,
+resumable, optionally-parallel study whose artifacts outlive any single run.
+
+### Two-stage workflow
+
+```bash
+cd experiments
+
+# 1) Search.  Only touches the TRAIN split (splits/default_split.npz).
+#    Writes results/tuning/xgb_search_v1/{best_params.json,study.db,trials.csv,plots/}.
+uv run python tune.py --model xgboost --name xgb_search_v1 --n-trials 50
+
+# 2) Evaluate on the held-out test split, loading the tuned params.
+#    No tuning happens inside run_experiment.py.
+uv run python run_experiment.py \
+    --model xgboost \
+    --name xgb_tuned_eval_v1 \
+    --params-file results/tuning/xgb_search_v1/best_params.json
+```
+
+Re-running step 1 with the same `--name` **resumes** the existing SQLite study
+(add `--fresh` to refuse to resume). You can also run multiple instances of
+step 1 concurrently against the same `--name`: Optuna's SQLite storage
+coordinates trials across workers.
+
+### `tune.py` CLI flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--model` / `-m` | *(required)* | Tunable model: `xgboost`, `catboost` |
+| `--name` / `-n`  | *(required)* | Tuning run name (= Optuna `study_name` + output folder) |
+| `--n-trials`     | 50 | Number of Optuna trials to run this invocation |
+| `--timeout`      | None | Wall-clock timeout in seconds |
+| `--cv`           | 5 | Stratified CV folds |
+| `--scoring`      | model default (f1) | Override scoring metric |
+| `--random-state` | 42 | Seed for TPE sampler + CV shuffle |
+| `--max-rows`     | None | Subsample N rows (smoke-tests) |
+| `--zarr`         | `../embeddings.zarr` | Path to embeddings store |
+| `--split-file`   | `splits/default_split.npz` | Same split as `run_experiment.py` |
+| `--results-dir`  | `results/` | Output goes under `<results-dir>/tuning/<name>/` |
+| `--resume`/`--fresh` | `--resume` | Resume an existing study, or refuse to |
+
+### Making a new model tunable by `tune.py`
+
+Add two hooks to the model class:
+
+```python
+@classmethod
+def get_tuning_spec(cls) -> dict:
+    return {
+        "estimator":   MyClassifier(**_DEFAULTS),  # fresh sklearn-compatible estimator
+        "param_space": {...},                      # Optuna-style dict schema
+        "scoring":     "f1",
+    }
+
+def apply_tuned_params(self, best_params, *, source=None, cv_score=None, method="external"):
+    self._params.update(best_params)
+    self._model.set_params(**best_params)
+    self._tuning_info = {
+        "enabled": True, "method": method,
+        "best_cv_score": float(cv_score) if cv_score is not None else None,
+        "best_params": dict(best_params), "source": source,
+    }
+```
+
+…then add the class to `TUNING_REGISTRY` in `tune.py`. The existing
+`XGBoostModel` and `CatBoostModel` are working references.
+
+### Legacy in-process tuning (`--tune-optuna`)
+
+`run_experiment.py --tune-optuna` still works for backward compatibility, but
+is **deprecated** in favour of the two-stage workflow above. The legacy mode
+conflates search and evaluation into one run, discards the Optuna study after
+the process exits, and offers no way to resume or parallelise trials.
+
 ## Feature sets
+
 
 ### Matryoshka embedding features (XGBoost & CatBoost)
 
