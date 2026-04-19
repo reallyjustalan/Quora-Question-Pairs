@@ -9,7 +9,6 @@ experiments/
 ├── data.py                  Loads zarr + CSV → list[PairRecord]  (shared, no model logic)
 ├── features.py              Primitive feature functions (embedding, lexical, matryoshka)
 ├── report.py                Metrics printer + results writer (metrics.txt, config.json, …)
-├── hyperparameter_tuning.py RandomizedSearchCV + OptunaSearchCV wrappers
 ├── run_experiment.py        ← ENTRY POINT #1 — evaluate a model on the fixed test split
 ├── tune.py                  ← ENTRY POINT #2 — dedicated Optuna hyperparameter search
 │
@@ -41,14 +40,23 @@ experiments/
 
 ## Running an experiment
 
-You might probably want to use the submit.sh script here, but if you don't want to use SLURM:
+On the cluster, submit via `submit.sh` **(recommended)**:
 
 ```bash
-cd experiments
-uv run python run_experiment.py --model catboost --name catboost_matryoshka_all_features
+# CPU job — run from the repo root, path is relative to it
+./submit.sh cpu experiments/run_experiment.py --model catboost --name catboost_v1
 
-# Optional: auto-push tracked results to DVC remote after a successful run
-uv run python run_experiment.py --model catboost --name catboost_matryoshka_all_features --dvc-push
+# With optional DVC push after the run
+./submit.sh cpu experiments/run_experiment.py --model catboost --name catboost_v1 --dvc-push
+
+# Quick smoke-test
+./submit.sh cpu experiments/run_experiment.py --model catboost --name catboost_smoke --max-rows 50000
+```
+
+If you want to run **locally** (outside the cluster):
+
+```bash
+uv run experiments/run_experiment.py --model catboost --name catboost_v1
 ```
 
 Available `--model` values: `xgboost`, `catboost`, `logreg`, `cosine`
@@ -85,19 +93,30 @@ resumable, optionally-parallel study whose artifacts outlive any single run.
 
 ### Two-stage workflow
 
-```bash
-cd experiments
+On the cluster via `submit.sh` **(recommended)**:
 
-# 1) Search.  Only touches the TRAIN split (splits/default_split.npz).
-#    Writes results/tuning/xgb_search_v1/{best_params.json,study.db,trials.csv,plots/}.
-uv run python tune.py --model xgboost --name xgb_search_v1 --n-trials 50
+```bash
+# 1) Search — only touches the TRAIN split.
+#    Writes experiments/results/tuning/xgb_search_v1/{best_params.json,study.db,trials.csv,plots/}.
+./submit.sh cpu experiments/tune.py --model xgboost --name xgb_search_v1 --n-trials 50
 
 # 2) Evaluate on the held-out test split, loading the tuned params.
 #    No tuning happens inside run_experiment.py.
-uv run python run_experiment.py \
+./submit.sh cpu experiments/run_experiment.py \
     --model xgboost \
     --name xgb_tuned_eval_v1 \
-    --params-file results/tuning/xgb_search_v1/best_params.json
+    --params-file experiments/results/tuning/xgb_search_v1/best_params.json
+```
+
+Locally:
+
+```bash
+uv run experiments/tune.py --model xgboost --name xgb_search_v1 --n-trials 50
+
+uv run experiments/run_experiment.py \
+    --model xgboost \
+    --name xgb_tuned_eval_v1 \
+    --params-file experiments/results/tuning/xgb_search_v1/best_params.json
 ```
 
 Re-running step 1 with the same `--name` **resumes** the existing SQLite study

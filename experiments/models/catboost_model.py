@@ -19,8 +19,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from data import PairRecord
 from features import build_matrix, matryoshka_all_features, DEFAULT_MATRYOSHKA_DIMS
-from hyperparameter_tuning import RandomizedSearchCV
-from hyperparameter_tuning import OptunaSearchCV
 
 
 # Default hyper-parameters — override by subclassing or passing kwargs to __init__
@@ -65,7 +63,6 @@ class CatBoostModel:
         self._dims = matryoshka_dims
         self._params = params
         self._feature_names: list[str] = []
-        self._last_tuner = None
         self._tuning_info: dict[str, object] = {
             "enabled": False,
         }
@@ -98,57 +95,6 @@ class CatBoostModel:
         y = np.array([r.label for r in records], dtype=np.int32)
         self._feature_names = feature_names
         return X, y, feature_names
-
-    # ------------------------------------------------------------------
-    # Sklearn-style interface
-    # ------------------------------------------------------------------
-
-    def tune(self, X: np.ndarray, y: np.ndarray) -> None:
-        tuner = RandomizedSearchCV(
-            estimator=CatBoostClassifier(**_DEFAULTS),
-            param_distributions=param_space,
-            n_iter=20,
-            cv=5,
-            scoring="f1",
-            random_state=42,
-            n_jobs=-1,
-        )
-        tuner.fit(X, y)
-        best_params = tuner.get_best_params()
-        best_score = tuner.get_best_score()
-        print("Best hyperparameters:", best_params)
-        self._params.update(best_params)
-        self._model.set_params(**best_params)
-        self._last_tuner = tuner
-        self._tuning_info = {
-            "enabled": True,
-            "method": "RandomizedSearchCV",
-            "best_cv_score": float(best_score),
-            "best_params": best_params,
-        }
-    
-    def tune_optuna(self, X: np.ndarray, y: np.ndarray) -> None:
-        tuner = OptunaSearchCV(
-            estimator=CatBoostClassifier(**_DEFAULTS),
-            param_distributions=param_space,
-            n_trials=20,
-            cv=5,
-            scoring="f1",
-            random_state=42
-            )
-        tuner.fit(X, y)
-        best_params = tuner.get_best_params()
-        best_score = tuner.get_best_score()
-        print("Best hyperparameters:", best_params)
-        self._params.update(best_params)
-        self._model.set_params(**best_params)
-        self._last_tuner = tuner
-        self._tuning_info = {
-            "enabled": True,
-            "method": "OptunaSearchCV",
-            "best_cv_score": float(best_score),
-            "best_params": best_params,
-        }
 
     # ------------------------------------------------------------------
     # Hooks used by experiments/tune.py (the dedicated tuning entry point)
@@ -206,9 +152,6 @@ class CatBoostModel:
         """Returns a name → importance mapping (only valid after fit)."""
         importances = self._model.get_feature_importance()
         return dict(zip(self._feature_names, importances.tolist()))
-
-    def get_tuner(self):
-        return self._last_tuner
 
     def get_config(self) -> dict:
         """

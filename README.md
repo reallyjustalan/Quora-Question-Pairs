@@ -75,6 +75,7 @@ Look up a question by ID with `np.searchsorted(store["ids"], qid)`.
 | `embed_quora_test.py` | Downloads the Kaggle **competition test** data, embeds every unique question, and writes to `test_embeddings.zarr`. Run this before `kaggle_submit.py`. Requires Kaggle credentials. |
 | `kaggle_submit.py` | Trains the chosen model on **all** training pairs, predicts on the competition test set, and writes `submissions/<name>/submission.csv` ready to upload to Kaggle. |
 | `experiments/run_experiment.py` | Plug-and-play experiment runner (local evaluation with train/test split) — see the [Experiment Harness](#experiment-harness) section below. |
+| `experiments/tune.py` | Dedicated Optuna hyperparameter search; runs a persistent, resumable study on the **train split only** — see [Hyperparameter Tuning](#hyperparameter-tuning) below. |
 
 ---
 
@@ -91,8 +92,8 @@ Look up a question by ID with `np.searchsorted(store["ids"], qid)`.
 > Useful Slurm commands:
 > | Command | What it does |
 > |---------|-------------|
-> | `sbatch slurm_gpu.sh <script.py> [args...]` | Submit a GPU job to the queue |
-> | `sbatch slurm_cpu.sh <script.py> [args...]` | Submit a CPU-only job to the queue |
+> | `./submit.sh gpu <script.py> [args...]` | Submit a GPU job (recommended — auto-names logs) |
+> | `./submit.sh cpu <script.py> [args...]` | Submit a CPU-only job (recommended — auto-names logs) |
 > | `squeue -u $USER` | Check the status of your queued/running jobs, $USER being your e1111.. username |
 > | `scancel <jobid>` | Cancel a job |
 > | `sinfo` | See available partitions and node status |
@@ -186,21 +187,30 @@ embeddings.zarr  ──►  data.py  ──►  model.build_features()  ──�
 The first run saves `experiments/splits/default_split.npz`. Every subsequent run loads those exact train/test indices. All models are therefore evaluated on **identical test rows**, making comparisons meaningful.
 
 ### Running an experiment
-You should be doing them through SLURM with the submit.sh script, but if you want to do it locally:
+
+On the cluster, submit via `submit.sh` **(recommended)**:
 
 ```bash
-cd experiments
-uv run python run_experiment.py --model catboost --name catboost_matryoshka_all_features
+# CPU job — scripts resolve all paths from the repo root automatically
+./submit.sh cpu experiments/run_experiment.py --model catboost --name catboost_v1
 
-# Optional: auto-push tracked experiment artifacts after a successful run
-uv run python run_experiment.py --model catboost --name catboost_matryoshka_all_features --dvc-push
+# With optional DVC push after the run
+./submit.sh cpu experiments/run_experiment.py --model catboost --name catboost_v1 --dvc-push
+
+# Quick smoke-test with a subset of rows
+./submit.sh cpu experiments/run_experiment.py --model catboost --name catboost_smoke --max-rows 50000
+```
+
+If you want to run **locally** (outside the cluster):
+
+```bash
+uv run experiments/run_experiment.py --model catboost --name catboost_v1
+
 ```
 
 Available `--model` values: `xgboost`, `catboost`, `logreg`, `cosine`
 
 For quick smoke-tests, add `--max-rows 50000`. Other useful flags: `--threshold`, `--test-size`, `--zarr`, `--split-file`, `--results-dir`. See `experiments/README.md` for the full flag reference.
-
-`--dvc-push` is opt-in so collaborators without DVC write credentials can still run experiments normally.
 
 ### Publishing cluster-generated results
 
@@ -259,6 +269,116 @@ experiments/results/
 ### Adding a new feature set
 
 Add a function to `features.py` that takes a `PairRecord` and returns `dict[str, float]`, then reference it from your model's `_feature_fn`.
+
+---
+
+## Hyperparameter Tuning
+
+Hyperparameter search and final-model evaluation are **deliberately kept as separate pipeline stages**.  Running them in the same process conflates search and evaluation, discards the Optuna study when the process exits, and gives no way to resume or parallelise trials.  The dedicated entry point `experiments/tune.py` handles search only; `run_experiment.py` handles evaluation only.
+
+### Two-stage workflow
+
+```
+tune.py  ──►  results/tuning/<name>/best_params.json  ──►  run_experiment.py --params-file …
+  (search on train split only)                               (evaluate on held-out test split,
+   persistent + resumable SQLite study)                       no tuning inside this run)
+```
+
+#### Stage 1 — search (on the cluster via `submit.sh`)
+
+```bash
+# CPU job — tune XGBoost with 50 Optuna trials
+./submit.sh cpu experiments/tune.py --model xgboost --name xgb_search_v1 --n-trials 50
+
+# Tune CatBoost with a wall-clock timeout instead of a fixed trial count
+./submit.sh cpu experiments/tune.py --model catboost --name cat_search_v1 --timeout 3600
+
+# Smoke-test on a subset of rows
+./submit.sh cpu experiments/tune.py --model xgboost --name xgb_smoke --n-trials 10 --max-rows 50000
+```
+
+Re-submitting with the **same `--name`** automatically resumes the existing SQLite study (add `--fresh` to refuse resumption).  You can also run multiple jobs against the same `--name` in parallel — Optuna's SQLite storage coordinates trials across workers.
+
+If you want to run **locally** (outside the cluster):
+
+```bash
+uv run experiments/tune.py --model xgboost --name xgb_search_v1 --n-trials 50
+```
+
+#### Stage 2 — evaluate (load the best params, run on held-out test split)
+
+```bash
+# On the cluster
+./submit.sh cpu experiments/run_experiment.py \
+    --model xgboost --name xgb_tuned_v1 \
+    --params-file experiments/results/tuning/xgb_search_v1/best_params.json
+
+# Locally
+uv run experiments/run_experiment.py \
+    --model xgboost --name xgb_tuned_v1 \
+    --params-file experiments/results/tuning/xgb_search_v1/best_params.json
+```
+
+#### Output of `tune.py`
+
+```
+experiments/results/tuning/
+└── <name>/
+    ├── best_params.json      ← feed into run_experiment.py via --params-file
+    ├── study.db              ← resumable Optuna SQLite storage
+    ├── trials.csv            ← every trial as a row
+    ├── tuning_config.json    ← audit trail (param space, CV folds, seeds, timing…)
+    └── plots/
+        ├── optimization_history.html
+        ├── param_importances.html
+        ├── parallel_coordinates.html
+        └── slice_<param>.html
+```
+
+### `tune.py` CLI flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--model` / `-m` | *(required)* | Tunable model: `xgboost`, `catboost`, `xgboost_classical` |
+| `--name` / `-n`  | *(required)* | Tuning run name (= Optuna `study_name` + output folder) |
+| `--n-trials`     | 50 | Number of Optuna trials to run this invocation |
+| `--timeout`      | None | Wall-clock timeout in seconds |
+| `--cv`           | 5 | Stratified CV folds |
+| `--scoring`      | model default (f1) | Override scoring metric |
+| `--random-state` | 42 | Seed for TPE sampler + CV shuffle |
+| `--max-rows`     | None | Subsample N rows (smoke-tests) |
+| `--zarr`         | `../embeddings.zarr` | Path to embeddings store |
+| `--split-file`   | `splits/default_split.npz` | Same split as `run_experiment.py` |
+| `--results-dir`  | `results/` | Output goes under `<results-dir>/tuning/<name>/` |
+| `--resume` / `--fresh` | `--resume` | Resume an existing study, or refuse to |
+
+### Making a model tunable
+
+Implement `get_tuning_spec()` on the model class and register it in `TUNING_REGISTRY` inside `tune.py`:
+
+```python
+@classmethod
+def get_tuning_spec(cls) -> dict:
+    return {
+        "estimator":   MyClassifier(**_DEFAULTS),  # fresh sklearn-compatible estimator
+        "param_space": {                            # Optuna-style dict schema
+            "learning_rate": {"type": "float", "low": 1e-3, "high": 0.3, "log": True},
+            "max_depth":     {"type": "int",   "low": 3,    "high": 10},
+        },
+        "scoring": "f1",
+    }
+
+def apply_tuned_params(self, best_params, *, source=None, cv_score=None, method="external"):
+    self._params.update(best_params)
+    self._model.set_params(**best_params)
+    self._tuning_info = {
+        "enabled": True, "method": method,
+        "best_cv_score": float(cv_score) if cv_score is not None else None,
+        "best_params": dict(best_params), "source": source,
+    }
+```
+
+The existing `XGBoostModel` and `CatBoostModel` are working references.
 
 ---
 
@@ -364,7 +484,8 @@ submissions/
 ├── embed_quora_test.py         # Step 1b: embed competition test questions → test_embeddings.zarr
 ├── kaggle_submit.py            # Step 3: train on all data → submissions/<name>/submission.csv
 ├── experiments/
-│   ├── run_experiment.py       # Step 2: entry point for local evaluation experiments
+│   ├── run_experiment.py       # Step 2a: entry point for evaluation experiments
+│   ├── tune.py                 # Step 2b: Optuna hyperparameter search (separate stage)
 │   ├── data.py                 # Shared loader: zarr + CSV → list[PairRecord]
 │   ├── features.py             # Primitive feature functions (embedding, lexical)
 │   ├── report.py               # Metrics printer + results writer

@@ -243,8 +243,23 @@ def parse_args() -> argparse.Namespace:
                         help="Path to cross_encoder_scores.zarr.")
     parser.add_argument("--split-file", default=None, metavar="PATH",
                         help="Path to saved split .npz. Defaults to splits/default_split.npz.")
-    parser.add_argument("--results-dir", default=None, metavar="PATH",
+    parser.add_argument("--results-dir", default="experiments/results", metavar="PATH",
                         help="Results root. Output goes under <results-dir>/tuning/<name>/.")
+    parser.add_argument(
+        "--dvc-push",
+        action="store_true",
+        help=(
+            "After a successful run, execute `uv run dvc push experiments/results` "
+            "from the repository root."
+        ),
+    )
+
+    parser.add_argument(
+        "--dvc-push-target",
+        default="experiments/results",
+        metavar="PATH",
+        help="DVC target path to push when --dvc-push is enabled.",
+    )
 
     resume_group = parser.add_mutually_exclusive_group()
     resume_group.add_argument(
@@ -263,6 +278,16 @@ def parse_args() -> argparse.Namespace:
 
     return parser.parse_args()
 
+
+def _maybe_dvc_push(*, enabled: bool, script_dir: str, target: str) -> None:
+    if not enabled:
+        return
+
+    repo_root = os.path.abspath(os.path.join(script_dir, ".."))
+    cmd = ["uv", "run", "dvc", "push", target]
+    print(f"\n[dvc] Running: {' '.join(cmd)} (cwd={repo_root})", flush=True)
+    subprocess.run(cmd, cwd=repo_root, check=True)
+    print("[dvc] Push complete.", flush=True)
 
 # ---------------------------------------------------------------------------
 # Main
@@ -338,6 +363,30 @@ def main() -> None:
         raise RuntimeError(
             f"Storage already exists at {storage_path}. "
             "Re-run with --resume (default) to continue, or delete the file to start fresh."
+        )
+
+    _study_exists = os.path.exists(storage_path)
+    if _study_exists:
+        # Peek at the trial count before loading so we can report it.
+        _peek = optuna.load_study(
+            study_name=args.name,
+            storage=storage_url,
+        )
+        _n_done = len([t for t in _peek.trials
+                       if t.state == optuna.trial.TrialState.COMPLETE])
+        _n_total = len(_peek.trials)
+        print(
+            f"[tune] RESUMING existing study '{args.name}' "
+            f"({_n_done} complete / {_n_total} total trials so far). "
+            f"Storage: {storage_path}",
+            flush=True,
+        )
+        del _peek
+    else:
+        print(
+            f"[tune] Starting FRESH study '{args.name}'. "
+            f"Storage will be created at: {storage_path}",
+            flush=True,
         )
 
     study = optuna.create_study(
@@ -453,6 +502,12 @@ def main() -> None:
         print(f"[tune] Wrote plots to {plots_dir}", flush=True)
     except Exception as exc:
         print(f"[tune] Could not write Optuna visualisations: {exc}", flush=True)
+
+    _maybe_dvc_push(
+        enabled=args.dvc_push,
+        script_dir=script_dir,
+        target=args.dvc_push_target,
+    )
 
     print(f"\n[tune] Total wall time: {time.time() - t0:.1f}s", flush=True)
     print("\n[tune] Next step — evaluate the tuned model on the held-out test set:")

@@ -33,7 +33,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from data import PairRecord
 from features import build_matrix, matryoshka_all_features, DEFAULT_MATRYOSHKA_DIMS
-from hyperparameter_tuning import RandomizedSearchCV
 
 
 # Default hyperparameters for the selector model and final reduced model
@@ -87,7 +86,6 @@ class RandomForestTopKModel:
         self._k_candidates = tuple(sorted(set(k_candidates or _DEFAULT_K_CANDIDATES)))
         self._dims = matryoshka_dims
         self._params = params
-        self._last_tuner = None
         self._tuning_info: dict[str, object] = {
             "enabled": False,
         }
@@ -136,81 +134,6 @@ class RandomForestTopKModel:
     # ------------------------------------------------------------------
     # Fit / predict
     # ------------------------------------------------------------------
-
-    def tune(self, X: np.ndarray, y: np.ndarray) -> None:
-        """
-        Tune RandomForest hyperparameters first, then tune top-k via CV.
-
-        This keeps the top-k selection logic aligned with the model's two-stage
-        training procedure (selector RF -> final RF on selected columns).
-        """
-        tuner = RandomizedSearchCV(
-            estimator=RandomForestClassifier(**self._params),
-            param_distributions=param_space,
-            n_iter=20,
-            cv=3,
-            scoring="f1",
-            random_state=42,
-            n_jobs=-1,
-        )
-        tuner.fit(X, y)
-        best_rf_params = tuner.get_best_params()
-        best_rf_score = tuner.get_best_score()
-        print("Best RF hyperparameters:", best_rf_params)
-        self._last_tuner = tuner
-
-        self._params.update(best_rf_params)
-        self._selector_model.set_params(**best_rf_params)
-        self._final_model.set_params(**best_rf_params)
-
-        # Tune k with stratified CV using the tuned RF hyperparameters.
-        skf = StratifiedKFold(n_splits=3, shuffle=True, random_state=42)
-        max_features = X.shape[1]
-
-        valid_k_candidates = sorted(
-            {int(k) for k in self._k_candidates if 1 <= int(k) <= max_features}
-        )
-        if not valid_k_candidates:
-            valid_k_candidates = [min(max(self._k, 1), max_features)]
-
-        best_k = self._k
-        best_k_score = float("-inf")
-
-        for k in valid_k_candidates:
-            fold_scores: list[float] = []
-            for train_idx, val_idx in skf.split(X, y):
-                X_tr, X_val = X[train_idx], X[val_idx]
-                y_tr, y_val = y[train_idx], y[val_idx]
-
-                selector = RandomForestClassifier(**self._params)
-                selector.fit(X_tr, y_tr)
-                order = np.argsort(selector.feature_importances_)[::-1]
-                selected_idx = order[:k]
-
-                final = RandomForestClassifier(**self._params)
-                final.fit(X_tr[:, selected_idx], y_tr)
-                y_pred = final.predict(X_val[:, selected_idx])
-                fold_scores.append(f1_score(y_val, y_pred, zero_division=0))
-
-            mean_score = float(np.mean(fold_scores))
-            if mean_score > best_k_score:
-                best_k_score = mean_score
-                best_k = k
-
-        self._k = int(best_k)
-        print(f"Best top-k: {self._k} (cv f1={best_k_score:.4f})")
-
-        self._tuning_info = {
-            "enabled": True,
-            "method": "RandomizedSearchCV + CV top-k search",
-            "best_cv_score_rf": float(best_rf_score),
-            "best_cv_score_k": float(best_k_score),
-            "best_params": {
-                **best_rf_params,
-                "k": int(best_k),
-            },
-            "k_candidates": valid_k_candidates,
-        }
 
     def fit(self, X_train: np.ndarray, y_train: np.ndarray) -> None:
         """
@@ -262,9 +185,6 @@ class RandomForestTopKModel:
 
         importances = self._final_model.feature_importances_
         return dict(zip(self._selected_feature_names, importances.tolist()))
-
-    def get_tuner(self):
-        return self._last_tuner
 
     def get_config(self) -> dict:
         dims_used = (

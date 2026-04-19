@@ -59,6 +59,7 @@ from sklearn.model_selection import train_test_split
 
 from data import load_pairs
 from models import GRUModelV3, LSTMModel
+from run_experiment import _maybe_dvc_push
 
 # ---------------------------------------------------------------------------
 # Search spaces
@@ -116,10 +117,27 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--results-dir",
-        default=None,
+        default="experiments/results",
         metavar="PATH",
         help="Directory where results are written.",
     )
+
+    parser.add_argument(
+        "--dvc-push",
+        action="store_true",
+        help=(
+            "After a successful run, execute `uv run dvc push experiments/results` "
+            "from the repository root."
+        ),
+    )
+
+    parser.add_argument(
+        "--dvc-push-target",
+        default="experiments/results",
+        metavar="PATH",
+        help="DVC target path to push when --dvc-push is enabled.",
+    )
+
     return parser.parse_args()
 
 
@@ -286,6 +304,11 @@ def run(args: argparse.Namespace) -> None:
     except Exception as e:
         print(f"[tune] Visualisations failed (non-fatal): {e}", flush=True)
 
+    _maybe_dvc_push(
+        enabled=args.dvc_push,
+        script_dir=script_dir,
+        target=args.dvc_push_target,
+    )
 
 if __name__ == "__main__":
     run(parse_args())
