@@ -25,8 +25,9 @@ to avoid any leakage.
 
 Usage (via run_experiment.py)
 -----------------------------
-    cd experiments
-    python run_experiment.py --model xgboost_classical --name xgboost_classical_v1
+    ./submit.sh cpu experiments/run_experiment.py --model xgboost_classical --name xgboost_classical_v1
+    # or locally:
+    uv run experiments/run_experiment.py --model xgboost_classical --name xgboost_classical_v1
 """
 
 from __future__ import annotations
@@ -49,7 +50,6 @@ from features import (
 from featurizers import TfidfPairFeaturizer
 from featurizers.char_ngram import CharNgramFeaturizer
 from featurizers.topic_model import TopicModelFeaturizer
-from hyperparameter_tuning import OptunaSearchCV
 
 
 # ---------------------------------------------------------------------------
@@ -123,7 +123,6 @@ class XGBoostClassicalModel:
         self._dims = matryoshka_dims
         self._params = params
         self._feature_names: list[str] = []
-        self._last_tuner = None
         self._tuning_info: dict[str, object] = {"enabled": False}
 
         # Train-fitted featurizers (instantiated here, fit in build_features)
@@ -235,33 +234,6 @@ class XGBoostClassicalModel:
         self._feature_names = feature_names
         return X, y, feature_names
 
-    # ------------------------------------------------------------------
-    # Sklearn-style interface
-    # ------------------------------------------------------------------
-
-    def tune_optuna(self, X: np.ndarray, y: np.ndarray) -> None:
-        tuner = OptunaSearchCV(
-            estimator=XGBClassifier(**_DEFAULTS),
-            param_distributions=param_space,
-            n_trials=20,
-            cv=5,
-            scoring="f1",
-            random_state=42,
-        )
-        tuner.fit(X, y)
-        best_params = tuner.get_best_params()
-        best_score  = tuner.get_best_score()
-        print("Best hyperparameters:", best_params)
-        self._params.update(best_params)
-        self._model.set_params(**best_params)
-        self._last_tuner = tuner
-        self._tuning_info = {
-            "enabled":       True,
-            "method":        "OptunaSearchCV",
-            "best_cv_score": float(best_score),
-            "best_params":   best_params,
-        }
-
     @classmethod
     def get_tuning_spec(cls) -> dict:
         return {
@@ -308,9 +280,6 @@ class XGBoostClassicalModel:
     def feature_importances(self) -> dict[str, float]:
         importances = self._model.feature_importances_
         return dict(zip(self._feature_names, importances.tolist()))
-
-    def get_tuner(self):
-        return self._last_tuner
 
     def get_config(self) -> dict:
         dims_used = (

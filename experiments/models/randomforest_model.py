@@ -16,7 +16,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from data import PairRecord
 from features import build_matrix, matryoshka_all_features, DEFAULT_MATRYOSHKA_DIMS
-from hyperparameter_tuning import RandomizedSearchCV
 
 
 # =========================
@@ -61,7 +60,6 @@ class RandomForestModel:
         self._model = RandomForestClassifier(**params)
         self._dims = matryoshka_dims
         self._params = params
-        self._last_tuner = None
         self._tuning_info: dict[str, object] = {
             "enabled": False,
         }
@@ -89,30 +87,6 @@ class RandomForestModel:
     # =========================
     # Model training
     # =========================
-    def tune(self, X: np.ndarray, y: np.ndarray) -> None:
-        tuner = RandomizedSearchCV(
-            estimator=RandomForestClassifier(**self._params),
-            param_distributions=param_space,
-            n_iter=20,
-            cv=3,
-            scoring="f1",
-            random_state=42,
-            n_jobs=-1,
-        )
-        tuner.fit(X, y)
-        best_params = tuner.get_best_params()
-        best_score = tuner.get_best_score()
-        print("Best hyperparameters:", best_params)
-        self._params.update(best_params)
-        self._model.set_params(**best_params)
-        self._last_tuner = tuner
-        self._tuning_info = {
-            "enabled": True,
-            "method": "RandomizedSearchCV",
-            "best_cv_score": float(best_score),
-            "best_params": best_params,
-        }
-    
     def fit(self, X_train: np.ndarray, y_train: np.ndarray) -> None:
         self._model.fit(X_train, y_train)
 
@@ -125,9 +99,6 @@ class RandomForestModel:
     def feature_importances(self) -> dict[str, float]:
         importances = self._model.feature_importances_
         return dict(zip(self._feature_names, importances.tolist()))
-
-    def get_tuner(self):
-        return self._last_tuner
 
     # =========================
     # Config for reporting
