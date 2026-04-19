@@ -1,40 +1,29 @@
 """
-gru_model_v3.py — Siamese GRU, third iteration.
+lstm_model.py — Siamese LSTM, mirroring GRU v3.
 
-Root-cause fixes vs v2:
-  ─────────────────────────────────────────────────────────────────────────
-  PROBLEM 1  — Training stopped too early.
-  With patience=3 and lr_patience=2 the model terminated after ≤5 epochs
-  (< 60s total). Fixes:
-    • patience   : 3  →  6
-    • lr_patience: 2  →  4
-    • val_frac   : 10% → 5%  (more training data, smaller overhead)
-    • epochs     : 20  →  30
+Architecture is identical to gru_model_v3.py with one change:
+  - nn.GRU  →  nn.LSTM
 
-  PROBLEM 2  — pos_weight was overcorrecting.
-  n_neg/n_pos ≈ 1.7 is a mild imbalance; applying it as a full 1.7× weight
-  pushed recall to 0.93 but tanked precision to 0.75.  Fix:
-    • Cap pos_weight at max_pos_weight (default 1.3).
+LSTM vs GRU:
+  GRU  has one hidden state h per step.
+  LSTM has two: h (hidden state) and c (cell state).
+  In PyTorch this means:
+    GRU  returns (outputs, h_n)
+    LSTM returns (outputs, (h_n, c_n))
+  Since we use attention pooling over all outputs, we discard h_n / c_n
+  entirely — the only change is unpacking the second return value.
 
-  PROBLEM 3  — Same effective capacity; no direct similarity signal fed to
-  the classifier.  Tree models that outperform the GRU all have direct access
-  to cosine similarity, L2 distance, dot product, etc.  The GRU had to
-  reconstruct those from scratch. Fixes:
-    • hidden_size: 128 →  256  (double encoder capacity)
-    • Scalar bridge features: cosine sim, L2 dist, dot product, |norm1−norm2|,
-      and element-wise product mean/std are computed directly from emb1/emb2
-      and concatenated into the MLP alongside the GRU interaction vector.
-      This gives the classifier an analytic shortcut it doesn't have to learn.
-
-  Other improvements carried over from v2:
-    • Attention pooling over GRU outputs
-    • Deep MLP head with LayerNorm + GELU
-    • Input LayerNorm before chunking
-    • Gradient clipping (global norm ≤ 1.0)
-    • ReduceLROnPlateau scheduler (now with more patience)
-    • Best-checkpoint restore
-
-  AdamW (weight_decay=1e-4) replaces plain Adam for better generalisation.
+Everything else carried over from v3:
+  • Bidirectional encoder (hidden_size=256 per direction → 512-d output)
+  • Attention pooling over all time steps
+  • Scalar bridge: 6 analytic similarity features concatenated into MLP
+  • Deep MLP head: LayerNorm → 512 → GELU → Dropout → LayerNorm → 256 → GELU → Dropout → 1
+  • AdamW (weight_decay=1e-4)
+  • ReduceLROnPlateau scheduler
+  • Early stopping (patience=6, lr_patience=4)
+  • Gradient clipping (global norm ≤ 1.0)
+  • Capped pos_weight (max 2.0), decision threshold=0.42
+  • val_frac=0.05, epochs=30
 """
 
 from __future__ import annotations
@@ -46,11 +35,11 @@ from torch.utils.data import DataLoader, TensorDataset
 
 
 # ---------------------------------------------------------------------------
-# Attention pooling
+# Attention pooling (identical to v3)
 # ---------------------------------------------------------------------------
 
 class _AttentionPool(nn.Module):
-    """Additive attention over GRU time-steps → context vector."""
+    """Additive attention over LSTM time-steps → context vector."""
 
     def __init__(self, hidden_size: int):
         super().__init__()
@@ -64,19 +53,19 @@ class _AttentionPool(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# Siamese GRU v3 network
+# Siamese LSTM network
 # ---------------------------------------------------------------------------
 
-class _SiameseGRUv3(nn.Module):
+class _SiameseLSTM(nn.Module):
     def __init__(
         self,
         embedding_dim: int  = 2560,
         chunk_size: int     = 256,
-        hidden_size: int    = 256,    # doubled vs v2
+        hidden_size: int    = 256,
         num_layers: int     = 2,
         dropout: float      = 0.3,
         mlp_hidden: int     = 512,
-        n_scalar: int       = 6,      # number of scalar bridge features
+        n_scalar: int       = 6,
     ):
         super().__init__()
         self.seq_len    = embedding_dim // chunk_size
@@ -86,8 +75,8 @@ class _SiameseGRUv3(nn.Module):
         # input normalisation
         self.input_norm = nn.LayerNorm(embedding_dim)
 
-        # GRU encoder
-        self.gru = nn.GRU(
+        # LSTM encoder (replaces GRU)
+        self.lstm = nn.LSTM(
             input_size    = chunk_size,
             hidden_size   = hidden_size,
             num_layers    = num_layers,
@@ -100,7 +89,7 @@ class _SiameseGRUv3(nn.Module):
         self.attn = _AttentionPool(h_full)
 
         # deep MLP classifier
-        # input = 4*h_full (GRU interaction) + n_scalar (analytic features)
+        # input = 4*h_full (LSTM interaction) + n_scalar (analytic features)
         clf_in = 4 * h_full + n_scalar
         self.classifier = nn.Sequential(
             nn.LayerNorm(clf_in),
@@ -117,7 +106,8 @@ class _SiameseGRUv3(nn.Module):
     def encode(self, x: torch.Tensor) -> torch.Tensor:
         x = self.input_norm(x)
         x = x.view(-1, self.seq_len, self.chunk_size)
-        outputs, _ = self.gru(x)
+        # LSTM returns (outputs, (h_n, c_n)) — discard states, use attention over outputs
+        outputs, _ = self.lstm(x)
         return self.attn(outputs)   # (B, 2H)
 
     def forward(
@@ -135,34 +125,30 @@ class _SiameseGRUv3(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# Scalar bridge: analytic similarity features computed from raw embeddings
+# Scalar bridge (identical to v3)
 # ---------------------------------------------------------------------------
 
 def _compute_scalars(emb1_np: np.ndarray, emb2_np: np.ndarray) -> np.ndarray:
     """
     Returns (N, 6) float32 array of analytic similarity features:
-      0: cosine similarity      (normalised dot product)
+      0: cosine similarity
       1: L2 (Euclidean) distance
-      2: normalised dot product (raw embeddings)
-      3: |norm1 − norm2|        (magnitude difference)
+      2: dot product (raw embeddings)
+      3: |norm1 − norm2|
       4: element-wise product mean
       5: element-wise absolute-difference mean
-
-    These are the exact scalars that tree models use to dominate — the GRU
-    previously had to learn approximations of these from scratch.
     """
-    norm1   = np.linalg.norm(emb1_np, axis=1, keepdims=True).clip(min=1e-12)
-    norm2   = np.linalg.norm(emb2_np, axis=1, keepdims=True).clip(min=1e-12)
-    ne1     = emb1_np / norm1
-    ne2     = emb2_np / norm2
+    norm1    = np.linalg.norm(emb1_np, axis=1, keepdims=True).clip(min=1e-12)
+    norm2    = np.linalg.norm(emb2_np, axis=1, keepdims=True).clip(min=1e-12)
+    ne1      = emb1_np / norm1
+    ne2      = emb2_np / norm2
 
-    cos_sim  = (ne1 * ne2).sum(axis=1, keepdims=True)              # (N,1)
-    l2_dist  = np.linalg.norm(emb1_np - emb2_np, axis=1,
-                               keepdims=True)                       # (N,1)
-    dot_raw  = (emb1_np * emb2_np).sum(axis=1, keepdims=True)      # (N,1)
-    norm_diff = np.abs(norm1 - norm2)                               # (N,1)
-    prod_mean = (emb1_np * emb2_np).mean(axis=1, keepdims=True)    # (N,1)
-    diff_mean = np.abs(emb1_np - emb2_np).mean(axis=1, keepdims=True)  # (N,1)
+    cos_sim   = (ne1 * ne2).sum(axis=1, keepdims=True)
+    l2_dist   = np.linalg.norm(emb1_np - emb2_np, axis=1, keepdims=True)
+    dot_raw   = (emb1_np * emb2_np).sum(axis=1, keepdims=True)
+    norm_diff = np.abs(norm1 - norm2)
+    prod_mean = (emb1_np * emb2_np).mean(axis=1, keepdims=True)
+    diff_mean = np.abs(emb1_np - emb2_np).mean(axis=1, keepdims=True)
 
     return np.concatenate(
         [cos_sim, l2_dist, dot_raw, norm_diff, prod_mean, diff_mean], axis=1
@@ -176,53 +162,34 @@ def _compute_scalars(emb1_np: np.ndarray, emb2_np: np.ndarray) -> np.ndarray:
 _DEFAULTS: dict = dict(
     embedding_dim  = 2560,
     chunk_size     = 256,
-    hidden_size    = 256,     # doubled from v2
+    hidden_size    = 256,
     num_layers     = 2,
     dropout        = 0.3,
     mlp_hidden     = 512,
-    epochs         = 30,      # more headroom
+    epochs         = 30,
     batch_size     = 512,
     lr             = 1e-3,
-    weight_decay   = 1e-4,    # AdamW weight decay
-    patience       = 6,       # early-stop patience (was 3)
+    weight_decay   = 1e-4,
+    patience       = 6,
     lr_factor      = 0.5,
-    lr_patience    = 4,       # LR patience (was 2)
+    lr_patience    = 4,
     grad_clip      = 1.0,
-    val_frac       = 0.05,    # smaller val split (was 0.10)
-    # Recall-oriented tuning
-    # ─────────────────────────────────────────────────────────────────
-    # In a question-deduplication UI it is worse to *miss* a duplicate
-    # (the user never sees a related question exists) than to show a
-    # borderline false positive (the user simply ignores it).  We
-    # therefore make two recall-friendly adjustments:
-    #
-    #   max_pos_weight = 2.0  — restore the full natural class-imbalance
-    #                           correction (~1.7×) and push slightly
-    #                           beyond it.  The training loss now penalises
-    #                           missed duplicates (FN) more heavily than
-    #                           false alarms (FP).
-    #
-    #   threshold = 0.42      — at inference the model must only be 42 %
-    #                           confident a pair is duplicate to call it
-    #                           so.  Shifting the operating point left on
-    #                           the ROC curve trades a small precision drop
-    #                           for a meaningful recall gain without any
-    #                           retraining.
-    max_pos_weight = 2.0,     # was 1.3; fully corrects + slightly boosts recall
-    threshold      = 0.42,    # was 0.5; lower cut-off → more duplicates surfaced
+    val_frac       = 0.05,
+    max_pos_weight = 2.0,
+    threshold      = 0.42,
     seed           = 42,
 )
 
-_N_SCALAR = 6   # must match _compute_scalars output width
+_N_SCALAR = 6
 
 
-class GRUModelV3:
-    name = "SiameseGRU_v3"
+class LSTMModel:
+    name = "SiameseLSTM"
 
     def __init__(self, **overrides):
         self.cfg       = {**_DEFAULTS, **overrides}
         self.threshold = self.cfg["threshold"]
-        self._model: _SiameseGRUv3 | None = None
+        self._model: _SiameseLSTM | None = None
         self._device   = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self._feature_names: list[str] | None = None
 
@@ -231,14 +198,12 @@ class GRUModelV3:
     def build_features(self, records):
         """
         X = [emb1 | emb2 | scalars(6)]  shape (N, 2*emb_dim + 6)
-        Scalar features are appended at the end so the split logic in fit()
-        and predict_proba() can slice them off cleanly.
         """
         emb1 = np.array([r.emb1 for r in records], dtype=np.float32)
         emb2 = np.array([r.emb2 for r in records], dtype=np.float32)
         y    = np.array([r.label for r in records], dtype=np.int64)
 
-        scalars = _compute_scalars(emb1, emb2)   # (N, 6)
+        scalars = _compute_scalars(emb1, emb2)
         X = np.concatenate([emb1, emb2, scalars], axis=1)
 
         self._feature_names = (
@@ -255,7 +220,7 @@ class GRUModelV3:
         torch.manual_seed(self.cfg["seed"])
         np.random.seed(self.cfg["seed"])
 
-        dim = (X_train.shape[1] - _N_SCALAR) // 2   # embedding dimension
+        dim = (X_train.shape[1] - _N_SCALAR) // 2
 
         # ---- train / val split ------------------------------------------- #
         val_frac = float(self.cfg["val_frac"])
@@ -291,16 +256,16 @@ class GRUModelV3:
         y_tr  = y_train[tr_idx]
         n_pos = int(y_tr.sum())
         n_neg = len(y_tr) - n_pos
-        raw_pw = n_neg / max(n_pos, 1)
+        raw_pw    = n_neg / max(n_pos, 1)
         capped_pw = min(raw_pw, float(self.cfg["max_pos_weight"]))
         pos_weight = torch.tensor([capped_pw], dtype=torch.float32).to(self._device)
         print(
-            f"  [GRU v3] pos_weight: raw={raw_pw:.3f}  capped={capped_pw:.3f}",
+            f"  [LSTM] pos_weight: raw={raw_pw:.3f}  capped={capped_pw:.3f}",
             flush=True,
         )
 
         # ---- build model ------------------------------------------------- #
-        self._model = _SiameseGRUv3(
+        self._model = _SiameseLSTM(
             embedding_dim = dim,
             chunk_size    = self.cfg["chunk_size"],
             hidden_size   = self.cfg["hidden_size"],
@@ -370,7 +335,7 @@ class GRUModelV3:
 
             current_lr = optimizer.param_groups[0]["lr"]
             print(
-                f"  [GRU v3] Epoch {epoch:>2}/{self.cfg['epochs']}  "
+                f"  [LSTM] Epoch {epoch:>2}/{self.cfg['epochs']}  "
                 f"train={avg_train:.4f}  val={avg_val:.4f}  "
                 f"lr={current_lr:.2e}",
                 flush=True,
@@ -389,7 +354,7 @@ class GRUModelV3:
                 patience_count += 1
                 if patience_count >= self.cfg["patience"]:
                     print(
-                        f"  [GRU v3] Early stopping at epoch {epoch} "
+                        f"  [LSTM] Early stopping at epoch {epoch} "
                         f"(best val={best_val_loss:.4f})",
                         flush=True,
                     )
@@ -400,7 +365,7 @@ class GRUModelV3:
                 {k: v.to(self._device) for k, v in best_state.items()}
             )
             print(
-                f"  [GRU v3] Restored best checkpoint (val={best_val_loss:.4f})",
+                f"  [LSTM] Restored best checkpoint (val={best_val_loss:.4f})",
                 flush=True,
             )
 
@@ -424,7 +389,7 @@ class GRUModelV3:
             np.concatenate(all_preds),
             zero_division=0,
         ))
-        print(f"  [GRU v3] Val F1 (threshold={self.threshold}): {val_f1:.4f}", flush=True)
+        print(f"  [LSTM] Val F1 (threshold={self.threshold}): {val_f1:.4f}", flush=True)
         return val_f1
 
     # -- interface: predict_proba --------------------------------------------
@@ -466,7 +431,7 @@ class GRUModelV3:
             if self._model is not None else 0
         )
         return {
-            "model_class": "SiameseGRU_v3",
+            "model_class": "SiameseLSTM",
             "total_params": params,
             **self.cfg,
         }

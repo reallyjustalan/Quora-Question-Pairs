@@ -1,0 +1,10 @@
+{
+  "model": "gru_v3",
+  "best_val_f1": 0.8569,
+  "hidden_size": 512,
+  "num_layers": 3,
+  "dropout": 0.18493564427131048,
+  "lr": 0.00023102018887845295,
+  "weight_decay": 3.549878832196503e-05,
+  "mlp_hidden": 512
+}

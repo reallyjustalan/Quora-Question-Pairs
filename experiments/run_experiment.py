@@ -64,7 +64,7 @@ from models import (
     CatBoostModel, CosineBaseline, EnsembleModel, LogRegModel,
     XGBoostModel, XGBoostClassicalModel,
     RandomForestModel, RandomForestTopKModel,
-    GRUModel, GRUModelV2, GRUModelV3, GRUModelV4,
+    GRUModel, GRUModelV2, GRUModelV3, GRUModelV4, LSTMModel,
 )
 
 # ---------------------------------------------------------------------------
@@ -83,6 +83,23 @@ MODEL_REGISTRY: dict[str, object] = {
     "gru_v2": GRUModelV2(),
     "gru_v3": GRUModelV3(),
     "gru_v4": GRUModelV4(),
+    "lstm":   LSTMModel(),
+    "lstm_tuned": LSTMModel(
+        hidden_size  = 256,
+        num_layers   = 1,
+        dropout      = 0.36307797995993946,
+        lr           = 0.0014286219021617456,
+        weight_decay = 5.4231498125545876e-05,
+        mlp_hidden   = 512,
+    ),
+    "gru_v3_tuned": GRUModelV3(
+        hidden_size  = 512,
+        num_layers   = 3,
+        dropout      = 0.18493564427131048,
+        lr           = 0.00023102018878452950,
+        weight_decay = 3.549878832196503e-05,
+        mlp_hidden   = 512,
+    ),
     # ------------------------------------------------------------------
     # Ensemble models
     # ------------------------------------------------------------------
