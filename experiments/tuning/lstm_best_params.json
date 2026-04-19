@@ -1,0 +1,10 @@
+{
+  "model": "lstm",
+  "best_val_f1": 0.8493537015276146,
+  "hidden_size": 512,
+  "num_layers": 1,
+  "dropout": 0.31902329642816163,
+  "lr": 0.000970848560695387,
+  "weight_decay": 0.0004105613633297132,
+  "mlp_hidden": 512
+}
