@@ -55,6 +55,8 @@ from optuna.samplers import TPESampler
 
 sys.path.insert(0, os.path.dirname(__file__))
 
+from sklearn.model_selection import train_test_split
+
 from data import load_pairs
 from models import GRUModelV3, LSTMModel
 from run_experiment import _maybe_dvc_push
@@ -217,6 +219,13 @@ def run(args: argparse.Namespace) -> None:
     X, y, _ = dummy.build_features(records)
     print(f"[tune] Feature matrix: {X.shape}", flush=True)
 
+    # Split off the test set first (same 80/20 split as run_experiment.py),
+    # so tuning never sees test data — avoids hyperparameter leakage.
+    X_train, _, y_train, _ = train_test_split(
+        X, y, test_size=0.2, random_state=42, stratify=y
+    )
+    print(f"[tune] Train split for tuning: {X_train.shape}", flush=True)
+
     # ------------------------------------------------------------------
     # 2. Run Optuna study
     # ------------------------------------------------------------------
@@ -228,7 +237,7 @@ def run(args: argparse.Namespace) -> None:
     )
 
     study.optimize(
-        make_objective(args.model, X, y),
+        make_objective(args.model, X_train, y_train),
         n_trials=args.n_trials,
     )
 
