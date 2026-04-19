@@ -33,10 +33,13 @@ class PairRecord(NamedTuple):
     label: int          # 0 or 1
     emb1: np.ndarray    # raw (un-normalised) embedding for q1
     emb2: np.ndarray    # raw (un-normalised) embedding for q2
-    norm_emb1: np.ndarray   # L2-normalised embedding for q1
-    norm_emb2: np.ndarray   # L2-normalised embedding for q2
     norm1: float        # L2 norm of emb1
     norm2: float        # L2 norm of emb2
+    # NOTE: norm_emb1 / norm_emb2 were removed to avoid keeping a full
+    # (N_unique × dim) normalised-embedding matrix alive alongside the raw
+    # one. With 2560-dim vectors that duplicated matrix cost ~5-10 GB of RAM.
+    # Callers that need the unit vector should compute it inline:
+    #   u = r.emb1 / max(r.norm1, 1e-12)
 
 
 # ---------------------------------------------------------------------------
@@ -119,7 +122,10 @@ def load_pairs(
     qid_to_pos = {int(qid): i for i, qid in enumerate(ids_arr)}
 
     raw_norms = np.linalg.norm(emb_arr, axis=1)
-    norm_emb = emb_arr / np.clip(raw_norms[:, None], 1e-12, None)
+    # Do NOT pre-compute a full normalised-embedding matrix here.
+    # With 2560-dim vectors it would duplicate the 5+ GB emb_arr in RAM
+    # and keep it alive for the entire run.  Cosine similarity is computed
+    # on-the-fly in features.py using the stored scalar norms instead.
 
     # --- CSV ---
     print(f"[data] Downloading dataset: {dataset_handle}", flush=True)
@@ -160,7 +166,6 @@ def load_pairs(
                 question1=q1, question2=q2,
                 label=label,
                 emb1=emb_arr[pos1], emb2=emb_arr[pos2],
-                norm_emb1=norm_emb[pos1], norm_emb2=norm_emb[pos2],
                 norm1=float(raw_norms[pos1]), norm2=float(raw_norms[pos2]),
             ))
 

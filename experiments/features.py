@@ -62,7 +62,11 @@ def embedding_features(r: PairRecord) -> dict[str, float]:
     norm1, norm2, norm_diff
     """
     u_raw, v_raw = r.emb1, r.emb2
-    u, v = r.norm_emb1, r.norm_emb2
+    # norm_emb1/norm_emb2 were removed from PairRecord to avoid keeping a
+    # duplicated (N × dim) matrix in RAM.  Compute the unit vectors here
+    # from the stored scalar norms — cost is two tiny divides per call.
+    u = u_raw / max(r.norm1, 1e-12)
+    v = v_raw / max(r.norm2, 1e-12)
 
     abs_diff = np.abs(u_raw - v_raw)
     prod = u_raw * v_raw

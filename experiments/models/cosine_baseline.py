@@ -47,8 +47,9 @@ class CosineBaseline:
     @staticmethod
     def _feature_fn(r: PairRecord) -> dict[str, float]:
         """Single feature: cosine similarity."""
-        u, v = r.norm_emb1, r.norm_emb2
-        return {"cos_sim": float(np.dot(u, v))}
+        # norm_emb1/norm_emb2 removed from PairRecord; compute on the fly.
+        cos_sim = float(np.dot(r.emb1, r.emb2)) / max(r.norm1 * r.norm2, 1e-12)
+        return {"cos_sim": cos_sim}
 
     def build_features(
         self, records: list[PairRecord]

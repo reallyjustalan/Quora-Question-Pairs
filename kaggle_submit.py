@@ -197,6 +197,7 @@ class TestPair(NamedTuple):
 def load_test_pairs(
     test_zarr_file: str = "test_embeddings.zarr",
     dataset_handle: str = "quora/question-pairs-dataset",
+    local_test_csv: str | None = None,
 ) -> list[TestPair]:
     """
     Build one TestPair per row of the competition test.csv.
@@ -209,6 +210,8 @@ def load_test_pairs(
     ----------
     test_zarr_file  : path to the zarr store written by embed_quora_test.py
     dataset_handle  : kagglehub dataset handle (public, no auth required)
+    local_test_csv  : if provided, use this local file instead of downloading
+                      (avoids any network / kaggle-auth dependency at submission time)
 
     Returns
     -------
@@ -224,18 +227,31 @@ def load_test_pairs(
     print(f"[test_data] texts shape      : {texts_np.shape}", flush=True)
     print(f"[test_data] embeddings shape : {emb_np.shape}", flush=True)
 
-    # Build lookup dict for O(1) access
+    # Build lookup dict for O(1) access, then free the texts array.
     text_to_pos: dict[str, int] = {str(t): i for i, t in enumerate(texts_np)}
+    del texts_np  # no longer needed; free memory now
 
-    # Pre-compute L2 norms and normalised vectors for all test embeddings
+    # Compute scalar L2 norms only — do NOT pre-compute a normalised-embedding
+    # matrix.  With 2560-dim vectors that matrix would duplicate the already
+    # large emb_np array in RAM (~10 GB for the test set) and cause OOM.
+    # Cosine similarity is computed on-the-fly in features.py from the stored
+    # scalar norms (r.norm1, r.norm2) instead.
     raw_norms = np.linalg.norm(emb_np, axis=1)                     # (N_unique,)
-    norm_emb  = emb_np / np.clip(raw_norms[:, None], 1e-12, None)   # (N_unique, dim)
 
-    # --- download test.csv ------------------------------------------------ #
-    print(f"[test_data] Downloading dataset: {dataset_handle}", flush=True)
-    comp_path = kagglehub.dataset_download(dataset_handle)
-    test_csv  = _find_test_csv(comp_path)
-    print(f"[test_data] Using test CSV : {test_csv}", flush=True)
+    # --- locate test.csv -------------------------------------------------- #
+    # Prefer a locally supplied path (no network needed) over kagglehub.
+    if local_test_csv:
+        test_csv = os.path.abspath(local_test_csv)
+        if not os.path.isfile(test_csv):
+            raise FileNotFoundError(
+                f"--local-test-csv path does not exist: {test_csv!r}"
+            )
+        print(f"[test_data] Using local test CSV : {test_csv}", flush=True)
+    else:
+        print(f"[test_data] Downloading dataset: {dataset_handle}", flush=True)
+        comp_path = kagglehub.dataset_download(dataset_handle)
+        test_csv  = _find_test_csv(comp_path)
+        print(f"[test_data] Using test CSV : {test_csv}", flush=True)
 
     # --- build TestPair list ---------------------------------------------- #
     print("[test_data] Building test pair records...", flush=True)
@@ -266,10 +282,8 @@ def load_test_pairs(
                 question1 = q1,
                 question2 = q2,
                 label     = 0,              # dummy — not used during predict
-                emb1      = emb_np[pos1],
-                emb2      = emb_np[pos2],
-                norm_emb1 = norm_emb[pos1],
-                norm_emb2 = norm_emb[pos2],
+                emb1      = emb_np[pos1],   # numpy view into emb_np
+                emb2      = emb_np[pos2],   # numpy view into emb_np
                 norm1     = float(raw_norms[pos1]),
                 norm2     = float(raw_norms[pos2]),
             )
@@ -383,6 +397,16 @@ def _parse_args() -> argparse.Namespace:
         metavar="N",
         help="Cap training data at N rows (useful for smoke-tests).",
     )
+    parser.add_argument(
+        "--local-test-csv",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Path to a local test.csv file.  When provided, kagglehub is NOT "
+            "contacted — useful on air-gapped cluster nodes where the file was "
+            "already downloaded when running embed_quora_test.py."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -404,6 +428,7 @@ def run(args: argparse.Namespace) -> None:
     print(f"[submit] Model           : {getattr(model, 'name', type(model).__name__)}", flush=True)
     print(f"[submit] Train zarr      : {train_zarr}", flush=True)
     print(f"[submit] Test zarr       : {test_zarr}", flush=True)
+    print(f"[submit] Local test CSV  : {args.local_test_csv or '(none — will use kagglehub)'}", flush=True)
     print(f"[submit] Output dir      : {output_dir}/{args.name}", flush=True)
     print(f"{'='*60}\n", flush=True)
 
@@ -422,7 +447,10 @@ def run(args: argparse.Namespace) -> None:
     # 2. Load test pairs
     # ------------------------------------------------------------------
     print("\n[submit] Loading test pairs...", flush=True)
-    test_data    = load_test_pairs(test_zarr_file=test_zarr)
+    test_data    = load_test_pairs(
+        test_zarr_file = test_zarr,
+        local_test_csv = args.local_test_csv,
+    )
     test_ids     = [tp.test_id for tp in test_data]
     test_records = [tp.record  for tp in test_data]
     N_test       = len(test_records)
@@ -469,6 +497,14 @@ def run(args: argparse.Namespace) -> None:
 
     print(f"[submit] X_train: {X_train.shape}  X_test: {X_test.shape}", flush=True)
 
+    # Release the record lists now that all scalar features are in X_all.
+    # This allows Python / NumPy to reclaim the embedding arrays that were
+    # kept alive by the PairRecord views:
+    #   • emb_arr  (training zarr)  ≈ N_unique_train × dim × 4 B  (~5.5 GB)
+    #   • emb_np   (test zarr)      ≈ N_unique_test  × dim × 4 B  (~10  GB)
+    # Total: up to ~15 GB freed before the (potentially large) fit() call.
+    del all_records, train_records, test_records, test_data
+
     # ------------------------------------------------------------------
     # 4. Fit on ALL training data (no held-out split)
     # ------------------------------------------------------------------
@@ -477,6 +513,9 @@ def run(args: argparse.Namespace) -> None:
     model.fit(X_train, y_train)
     print(f"[submit] Fit complete in {time.time() - t_fit:.1f}s", flush=True)
 
+    # Training features and labels are no longer needed after fit.
+    del X_train, y_train
+
     # ------------------------------------------------------------------
     # 5. Predict on test set
     # ------------------------------------------------------------------
@@ -484,6 +523,7 @@ def run(args: argparse.Namespace) -> None:
     t_pred = time.time()
     proba  = model.predict_proba(X_test)   # shape (N_test,), values in [0, 1]
     print(f"[submit] Predict complete in {time.time() - t_pred:.1f}s", flush=True)
+    del X_test  # test features no longer needed
     print(
         f"[submit] Proba  min={proba.min():.4f}  "
         f"max={proba.max():.4f}  "
@@ -529,13 +569,14 @@ def run(args: argparse.Namespace) -> None:
         "n_features":      X_all.shape[1] if X_all.ndim > 1 else 1,
         "feature_names":   feature_names,
         "cli_args": {
-            "model":          args.model,
-            "name":           args.name,
-            "train_zarr":     args.train_zarr,
-            "test_zarr":      args.test_zarr,
-            "output_dir":     args.output_dir,
-            "threshold":      args.threshold,
-            "max_train_rows": args.max_train_rows,
+            "model":           args.model,
+            "name":            args.name,
+            "train_zarr":      args.train_zarr,
+            "test_zarr":       args.test_zarr,
+            "output_dir":      args.output_dir,
+            "threshold":       args.threshold,
+            "max_train_rows":  args.max_train_rows,
+            "local_test_csv":  args.local_test_csv,
         },
     }
     if hasattr(model, "get_config"):
