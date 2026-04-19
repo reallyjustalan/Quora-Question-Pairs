@@ -55,7 +55,8 @@ from optuna.samplers import TPESampler
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-from sklearn.model_selection import train_test_split
+from sklearn.metrics import f1_score as _f1_score
+from sklearn.model_selection import StratifiedKFold, train_test_split
 
 from data import load_pairs
 from models import GRUModelV3, LSTMModel
@@ -101,6 +102,12 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=20,
         help="Number of Optuna trials.",
+    )
+    parser.add_argument(
+        "--n-splits",
+        type=int,
+        default=3,
+        help="Number of folds for stratified k-fold cross-validation.",
     )
     parser.add_argument(
         "--max-rows",
@@ -161,8 +168,8 @@ def _sample_params(trial: optuna.Trial) -> dict:
     return params
 
 
-def make_objective(model_key: str, X: np.ndarray, y: np.ndarray):
-    """Return an Optuna objective function closed over the data."""
+def make_objective(model_key: str, X: np.ndarray, y: np.ndarray, n_splits: int = 3):
+    """Return an Optuna objective function closed over the data using k-fold CV."""
 
     def objective(trial: optuna.Trial) -> float:
         params = _sample_params(trial)
@@ -170,16 +177,31 @@ def make_objective(model_key: str, X: np.ndarray, y: np.ndarray):
         print(f"\n[trial {trial.number}] Params: {params}", flush=True)
         t0 = time.time()
 
-        if model_key == "lstm":
-            model = LSTMModel(**params)
-        else:
-            model = GRUModelV3(**params)
+        kf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
+        fold_f1s = []
 
-        val_f1 = model.fit(X, y)
+        for fold, (train_idx, val_idx) in enumerate(kf.split(X, y)):
+            X_fold_train, X_fold_val = X[train_idx], X[val_idx]
+            y_fold_train, y_fold_val = y[train_idx], y[val_idx]
+
+            if model_key == "lstm":
+                model = LSTMModel(**params)
+            else:
+                model = GRUModelV3(**params)
+
+            model.fit(X_fold_train, y_fold_train)
+
+            proba = model.predict_proba(X_fold_val)
+            preds = (proba >= model.threshold).astype(int)
+            fold_f1 = float(_f1_score(y_fold_val, preds, zero_division=0))
+            fold_f1s.append(fold_f1)
+            print(f"[trial {trial.number}] Fold {fold+1}/{n_splits} F1={fold_f1:.4f}", flush=True)
+
+        val_f1 = float(np.mean(fold_f1s))
 
         elapsed = time.time() - t0
         print(
-            f"[trial {trial.number}] Val F1={val_f1:.4f}  ({elapsed:.1f}s)",
+            f"[trial {trial.number}] Mean CV F1={val_f1:.4f}  ({elapsed:.1f}s)",
             flush=True,
         )
         return val_f1
@@ -237,7 +259,7 @@ def run(args: argparse.Namespace) -> None:
     )
 
     study.optimize(
-        make_objective(args.model, X_train, y_train),
+        make_objective(args.model, X_train, y_train, n_splits=args.n_splits),
         n_trials=args.n_trials,
     )
 
