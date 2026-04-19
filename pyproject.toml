@@ -10,6 +10,7 @@ dependencies = [
     "kagglehub>=1.0.0",
     "numpy>=2.0.0",
     "optuna>=4.8.0",
+    "plotly>=6.0.0",
     "python-dotenv>=1.2.2",
     "scikit-learn>=1.8.0",
     "sentence-transformers>=3.0.0",
