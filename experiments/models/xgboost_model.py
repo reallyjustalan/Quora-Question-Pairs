@@ -28,10 +28,10 @@ _DEFAULTS = dict(
     learning_rate=0.05,
     subsample=0.9,
     colsample_bytree=0.8,
-    reg_lambda=1.0,
+    reg_alpha=1.0,
     objective="binary:logistic",
     eval_metric="logloss",
-    tree_method="hist",
+    tree_method="gpu_hist",
     random_state=42,
     n_jobs=-1,
 )
