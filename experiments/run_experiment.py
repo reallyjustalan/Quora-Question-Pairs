@@ -86,10 +86,10 @@ MODEL_REGISTRY: dict[str, object] = {
     "lstm":   LSTMModel(),
     "lstm_tuned": LSTMModel(
         hidden_size  = 256,
-        num_layers   = 2,
-        dropout      = 0.1079232903114802,
-        lr           = 0.001320862780290983,
-        weight_decay = 0.00015926060604766042135,
+        num_layers   = 1,
+        dropout      = 0.36307797995993946,
+        lr           = 0.0014286219021617456,
+        weight_decay = 5.4231498125545876e-05,
         mlp_hidden   = 512,
     ),
     "gru_v3_tuned": GRUModelV3(
